@@ -59,6 +59,7 @@ export interface FakeHarness {
  * @param events - the session's raw log.
  * @param sessionQuery - service resolved inside the scope.
  * @param subagents - optional subagent runtime resolved inside the scope.
+ * @param header - optional session-header facts; subagent children carry origin/depth.
  * @returns the agent and its fiber record.
  */
 export function fakeAgent(
@@ -66,6 +67,7 @@ export function fakeAgent(
   events: readonly SessionEvent[],
   sessionQuery: SessionQueryLike,
   subagents?: SubagentsLike,
+  header: Record<string, unknown> = {},
 ): FakeAgentHandle {
   const fiber: FakeFiber = {
     disposed: false,
@@ -81,7 +83,7 @@ export function fakeAgent(
     ...subagents === undefined ? {} : { subagents },
   })
   const agent = {
-    session: { id: id as SessionId, snapshotEvents: () => events },
+    session: { id: id as SessionId, header, snapshotEvents: () => events },
     ctx: {
       inject: (_deps: readonly string[], callback: (scope: Context) => void) => {
         const scope = scopeOf()

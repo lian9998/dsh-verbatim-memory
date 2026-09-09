@@ -110,8 +110,9 @@ function budgetOf(rawMaxChars: unknown, resolved: ResolvedConfig): RenderBudget 
  * Register the memory tools and their guidance in one agent scope.
  * @param scope - the agent's scoped context, providing `tools`, `systemPrompt`, and `sessionQuery`.
  * @param resolved - validated configuration.
+ * @param agent - the agent whose scope this is; a subagent child gets the read-only subset.
  */
-export function installMemoryTools(scope: Context, resolved: ResolvedConfig): void {
+export function installMemoryTools(scope: Context, resolved: ResolvedConfig, agent: Agent): void {
   scope.systemPrompt.section({
     name: 'tool:verbatim-memory',
     order: 114,
@@ -229,6 +230,10 @@ export function installMemoryTools(scope: Context, resolved: ResolvedConfig): vo
   // must keep working when a deployment has none.
   const subagents = resolveSubagents(scope)
   if (!resolved.recallEnabled || subagents === undefined) return
+  // A delegated child gets the read-only tools and nothing that starts another
+  // agent. Leaving memory_recall out of its catalog is the first guard; the
+  // refusal in the tool body is the second.
+  if (isSubagentChild(agent)) return
 
   scope.tools.register(defineTool({
     name: 'memory_recall',
@@ -297,7 +302,7 @@ export function apply(ctx: Context, config: Config): void {
     if (fibers.has(agent)) return
     if (resolved.exposeAfterCompaction && !hasCompactionCheckpoint(agent.session.snapshotEvents())) return
     const fiber = agent.ctx.inject(['tools', 'systemPrompt', 'sessionQuery'], (scope) => {
-      installMemoryTools(scope, resolved)
+      installMemoryTools(scope, resolved, agent)
     })
     fibers.set(agent, fiber)
   }

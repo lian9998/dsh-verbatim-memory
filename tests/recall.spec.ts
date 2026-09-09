@@ -121,6 +121,20 @@ describe('memory_recall registration', () => {
     const scope = installed(fakeSubagents({ structured: { answer: 'x', evidence: [] } }))
     expect(scope.sections[0]?.text).toContain('memory_recall')
   })
+
+  it('registers only the read-only tools for a subagent child', () => {
+    const handle = fakeAgent(
+      's-child',
+      [checkpointEvent()],
+      fakeSessionQuery(sessionFixture()),
+      fakeSubagents({ structured: { answer: 'x', evidence: [] } }),
+      { origin: 'subagent', delegationDepth: 1 },
+    )
+    apply(fakeHarness([handle.agent]).ctx, {})
+    expect([...handle.fiber.scope!.tools.keys()].sort())
+      .toEqual([...RECALL_CHILD_TOOLS, 'memory_ask'].sort())
+    expect(handle.fiber.scope!.tools.has('memory_recall')).toBe(false)
+  })
 })
 
 describe('memory_recall child contract', () => {
@@ -129,7 +143,7 @@ describe('memory_recall child contract', () => {
     await call(installed(subagents, { recallProvider: 'fork' }), 'memory_recall', { question: 'is she angry?' })
     const started = subagents.requests[0]
     expect(started?.name).toBe('fork')
-    expect(started?.request.toolFilter?.allow).toEqual([...RECALL_CHILD_TOOLS])
+    expect(started?.request.toolFilter).toEqual({ allow: [] })
     expect(started?.request.outputSchema).toBe(RECALL_OUTPUT_SCHEMA)
     expect(started?.request.maxDepth).toBe(1)
     expect(started?.request.prompt[0]?.text).toContain('is she angry?')

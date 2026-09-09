@@ -28,9 +28,22 @@ import type { ScanHit, SessionQueryLike } from './scan.js'
 
 /**
  * Tools the recall child may use. Everything else — including this tool, so a
- * child cannot recurse — is removed from its catalog.
+ * child cannot recurse — is kept out of its catalog.
  */
 export const RECALL_CHILD_TOOLS = ['memory_list', 'memory_search', 'memory_read'] as const
+
+/**
+ * Tool filter applied to the recall child.
+ *
+ * `allow: []` keeps none of the tools the child would otherwise inherit — the
+ * deployment's globals and the parent's preset plane — while the child's OWN
+ * layer stays visible. That exemption is deliberate: a restriction filters what
+ * a scope inherits and never what its own layer registers, which is where the
+ * memory tools (this plugin) and `structured_output` (the delegation runtime)
+ * live. Naming the memory tools in `allow` cannot work — `restrict()` validates
+ * names against the restrictable inherited set and rejects scope-local ones.
+ */
+export const RECALL_CHILD_TOOL_FILTER: RecallToolRestriction = { allow: [] }
 
 /**
  * Event type that marks a subagent child's log when its header is unavailable.
@@ -316,7 +329,7 @@ export async function runRecall(request: RecallRequest): Promise<RecallOutcome> 
     prompt: buildRecallPrompt(question, maxSeqs),
     parent: request.parent,
     signal: request.signal,
-    toolFilter: { allow: [...RECALL_CHILD_TOOLS] },
+    toolFilter: RECALL_CHILD_TOOL_FILTER,
     maxDepth: 1,
     outputSchema: RECALL_OUTPUT_SCHEMA,
   })

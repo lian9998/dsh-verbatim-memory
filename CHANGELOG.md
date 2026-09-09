@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.2
+
+Fix: the recall child could not be started at all — `toolFilter` named tools the
+registry refuses to restrict.
+
+- **Wrong filter shape** — the child was started with
+  `toolFilter: { allow: ["memory_list", "memory_search", "memory_read"] }`, and
+  `restrict()` validates names against the tools a scope *inherits*. These are
+  registered in the child's own scope, so every start failed with
+  `tools.restrict() names unknown global tools …`. The filter is now
+  `{ allow: [] }`: a restriction never applies to the scope's own registrations,
+  so the child keeps exactly its scoped tools — the read-only memory tools plus
+  the delegation runtime's `structured_output` — and inherits none of the
+  deployment's globals or the parent's preset plane.
+- **No recursive catalog entry** — `memory_recall` is no longer registered for a
+  subagent child, so the child's catalog holds only the read-only tools. The
+  in-body refusal stays as the second guard.
+- **Contract test** — `tests/tool-filter.spec.ts` drives the real `ToolRuntime`
+  (not the fakes) and pins the exemption this depends on: `allow: []` hides
+  every inherited tool, keeps the scope-local one, leaves the deployment's view
+  untouched, and naming a scope-local tool is rejected. This is the test that
+  would have caught the original defect.
+
 ## 0.4.1
 
 Fix: `memory_recall` refused to run in the sessions that need it most.

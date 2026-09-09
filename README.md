@@ -152,7 +152,7 @@ Answer a question whose wording you cannot guess — *"is she angry?"*, *"what d
 | `max_seqs` | integer, optional | Maximum evidence pairs accepted from the child. Defaults to `recallSeqs`. |
 | `max_chars` | integer, optional | Largest total rendered size. Defaults to `defaultOutputChars`. |
 
-The child is started through `recallProvider` (default `fork`) with `maxDepth: 1` and a tool filter that leaves it **only** `memory_list`, `memory_search`, and `memory_read` — no file or shell tools, and no `memory_recall`, so a child cannot recurse. It is asked for one line plus `{seq, quote}` pairs.
+The child is started through `recallProvider` (default `fork`) with `maxDepth: 1` and `toolFilter: { allow: [] }`. That empty list is exact, not a placeholder: `restrict()` filters only the tools a scope *inherits* (the deployment's globals and the parent's preset plane), so the child keeps exactly the tools registered in its own scope — the read-only `memory_list`, `memory_search`, `memory_read`, and `memory_ask` from this plugin plus the delegation runtime's `structured_output`. No file or shell tools, and `memory_recall` is not registered for a subagent child at all, so a child cannot recurse. It is asked for one line plus `{seq, quote}` pairs.
 
 The caller then re-reads every pair from its own log: a pair is kept only when the quoted text really occurs at the seq it named, and a kept pair is rendered as the **exact logged text**, not the child's copy of it. The child's one line is rendered separately, labeled `child answer (unverified)`, and must not be quoted as fact.
 
@@ -249,7 +249,7 @@ This package's literal scan needs no index and works on every deployment, includ
 ## Model experience
 
 - **System prompt** — one fixed guidance section (`tool:verbatim-memory`, order 114), present only for sessions whose tools are installed; KV-cache prefix-stable while it is present.
-- **Tool catalog** — zero memory schemas before compaction, four after, five when a subagent runtime is reachable. The catalog change fires `tools/change`, so the next assembly reflects it.
+- **Tool catalog** — zero memory schemas before compaction, four after, five when a subagent runtime is reachable. A subagent child gets four (no `memory_recall`), and the recall child's filter hides everything it inherits. The catalog change fires `tools/change`, so the next assembly reflects it.
 - **Delegated recall** — `memory_recall` blocks for the child's run and returns one labeled, unverified sentence plus exact excerpts. It is the only tool here that starts another agent, and it is unavailable to a subagent child session (identified by the durable `origin: subagent` / `delegationDepth` header facts, so a top-level session resumed after a restart — whose log also carries a `session/end-seed` boundary — keeps the tool).
 - **Tool results** — plain text, bounded by the row and total output budgets; oversized rows are truncated at a marker naming the `seq` that reads them in full, and the host's spill policy is the last resort rather than the first.
 - **Compaction** — the replacement checkpoint is metadata and retrieval instructions only, and it names the tools that just became available. Note that the base backend frames every checkpoint with a fixed "condensing an earlier span" preamble; the stub body states explicitly that no summary was generated.
