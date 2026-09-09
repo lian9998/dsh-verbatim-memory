@@ -75,6 +75,36 @@ function literalPattern(text: string): RegExp {
   return new RegExp(escaped, 'iu')
 }
 
+/**
+ * Project one service filter clause into a predicate over fake events.
+ * @param filter - a clause the real service accepts.
+ * @returns the predicate for that clause.
+ */
+function eventPredicate(filter: SessionEventResultFilter): (event: FakeEvent) => boolean {
+  switch (filter.kind) {
+    case 'text': {
+      const pattern = literalPattern(filter.text)
+      return event => pattern.test(event.text)
+    }
+    case 'type': {
+      const values = new Set<string>(filter.values)
+      return event => values.has(event.type)
+    }
+    case 'surface': {
+      const values = new Set<string>(filter.values)
+      return event => values.has(event.surface)
+    }
+    case 'seq':
+      return event => (filter.from === undefined || event.seq >= filter.from)
+        && (filter.to === undefined || event.seq <= filter.to)
+    case 'time':
+      return event => (filter.from === undefined || event.time >= filter.from)
+        && (filter.to === undefined || event.time <= filter.to)
+    default:
+      throw new Error(`unsupported filter ${JSON.stringify(filter)}`)
+  }
+}
+
 /** A minimal but faithful single-session session-query fake. */
 export function fakeSessionQuery(session: FakeSession): SessionQueryLike {
   return {
@@ -84,10 +114,9 @@ export function fakeSessionQuery(session: FakeSession): SessionQueryLike {
     ): Promise<readonly SessionEventSearchDocument[]> {
       if (id !== session.header.id) throw new Error(`unknown session ${id}`)
       if (session.failScan !== undefined) throw new Error(session.failScan)
-      const text = filters.find(filter => filter.kind === 'text')
-      const pattern = text?.kind === 'text' ? literalPattern(text.text) : undefined
+      const predicates = filters.map(eventPredicate)
       return session.events
-        .filter(event => pattern === undefined || pattern.test(event.text))
+        .filter(event => predicates.every(predicate => predicate(event)))
         .map(event => ({
           sessionId: id,
           seq: seq(event.seq),

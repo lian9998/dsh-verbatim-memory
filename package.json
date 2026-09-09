@@ -1,6 +1,6 @@
 {
   "name": "dsh-verbatim-memory",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Verbatim memory for the DeepSeek Harness: session-scoped exact recall tools that appear after compaction, plus a lossless compaction backend that never summarizes",
   "keywords": [
     "dsh",
@@ -28,8 +28,7 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib/index.js",
-    "lib/compaction.js",
+    "lib/**/*.js",
     "lib/types/**/*.d.ts",
     "preset.example.yml",
     "README.md",

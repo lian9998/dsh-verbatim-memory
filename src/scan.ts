@@ -19,6 +19,8 @@ import type {
   SessionEventSurface,
   SessionEventWindow,
 } from '@deepseek-ai/dsh-session-query'
+import { toClauses } from './filters.js'
+import type { ScanFilters } from './filters.js'
 
 /** The `ctx.sessionQuery` surface this plugin consumes. */
 export interface SessionQueryLike {
@@ -45,12 +47,28 @@ export interface ScanHit {
   readonly text: string
 }
 
+/** Options that shape one scan without changing what it may read. */
+export interface ScanOptions {
+  /** Metadata predicates AND-ed with the literal phrase. */
+  readonly filters?: ScanFilters
+  /** Result order by seq: `asc` is log order (default), `desc` is newest first. */
+  readonly order?: 'asc' | 'desc'
+  /** Matches to skip before the returned window, for paging a large set. */
+  readonly offset?: number
+}
+
 /** The complete outcome of one literal scan. */
 export interface ScanOutcome {
-  /** Matches in ascending seq order, capped by the requested limit. */
+  /** Matches in requested order, capped by the requested limit. */
   readonly hits: readonly ScanHit[]
-  /** Whether the limit stopped the scan early. */
+  /** Total matching documents before `limit` and `offset`. */
+  readonly matched: number
+  /** Offset applied before the returned window. */
+  readonly offset: number
+  /** Whether `limit` or `offset` withheld any match. */
   readonly truncated: boolean
+  /** Offset that continues this result set, absent when nothing was withheld. */
+  readonly nextOffset?: number
 }
 
 /**
@@ -68,27 +86,33 @@ export function requireQuery(raw: string): string {
 }
 
 /**
- * Scan one session's log for a literal phrase.
+ * Scan one session's log for a literal phrase and/or metadata predicates.
+ *
+ * A missing phrase makes this an enumeration: the predicates alone select the
+ * result set, which is how a set question is answered in one call.
  * @param query - session-query service.
  * @param sessionId - the calling session's id.
- * @param queryText - already-trimmed literal phrase.
+ * @param queryText - already-trimmed literal phrase, or `undefined` to enumerate by metadata only.
  * @param limit - maximum matches returned.
- * @returns matches with surface classification and truncation state.
+ * @param options - metadata predicates, result order, and paging offset.
+ * @returns matches with surface classification, total count, and truncation state.
  */
 export async function scanSession(
   query: SessionQueryLike,
   sessionId: SessionId,
-  queryText: string,
+  queryText: string | undefined,
   limit: number,
+  options: ScanOptions = {},
 ): Promise<ScanOutcome> {
-  const documents = await query.filterEvents(sessionId, [{ kind: 'text', text: queryText }])
+  const clauses: SessionEventResultFilter[] = [
+    ...toClauses(options.filters ?? {}),
+    ...queryText === undefined ? [] : [{ kind: 'text' as const, text: queryText }],
+  ]
+  const documents = await query.filterEvents(sessionId, clauses)
+  const ordered = options.order === 'desc' ? [...documents].reverse() : documents
+  const offset = Math.max(0, Math.trunc(options.offset ?? 0))
   const hits: ScanHit[] = []
-  let truncated = false
-  for (const document of documents) {
-    if (hits.length >= limit) {
-      truncated = true
-      break
-    }
+  for (const document of ordered.slice(offset, offset + limit)) {
     hits.push({
       seq: document.seq,
       type: document.type,
@@ -97,7 +121,15 @@ export async function scanSession(
       text: document.text,
     })
   }
-  return { hits, truncated }
+  const consumed = offset + hits.length
+  const truncated = consumed < documents.length
+  return {
+    hits,
+    matched: documents.length,
+    offset,
+    truncated,
+    ...truncated ? { nextOffset: consumed } : {},
+  }
 }
 
 /**

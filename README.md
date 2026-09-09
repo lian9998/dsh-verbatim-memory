@@ -1,12 +1,12 @@
 # dsh-verbatim-memory
 
-Verbatim memory for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): when compaction removes a session's older context, three tools appear that let the model read that context back **exactly as it was logged** — and a lossless compaction backend that never summarizes.
+Verbatim memory for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): when compaction removes a session's older context, four tools appear that let the model read that context back **exactly as it was logged** — and a lossless compaction backend that never summarizes.
 
 Two Cordis plugins ship in one package:
 
 | Entry | Row name | What it does |
 |---|---|---|
-| `.` | `dsh-verbatim-memory` | Three read-only model tools over the host `ctx.sessionQuery` service, registered per agent and **hidden until that session has been compacted**. They search only the calling session's own log. |
+| `.` | `dsh-verbatim-memory` | Four read-only model tools over the host `ctx.sessionQuery` service, registered per agent and **hidden until that session has been compacted**. They read only the calling session's own log. |
 | `./compaction` | `dsh-verbatim-memory/compaction` | A `ctx.compaction` backend that inherits pressure measurement, retention, and overflow recovery from `@deepseek-ai/dsh-compaction-basic` but replaces the LLM summarization call with a deterministic retrieval stub. |
 
 The design rule is the whole point: **memory content is never generated.** Indexes, counts, timestamps, and handles may be derived; the text a model reads is always the exact bytes that were logged.
@@ -29,7 +29,7 @@ dsh plugin --profile web add /path/to/dsh-verbatim-memory
 
 # or from a packed tarball
 npm pack
-dsh plugin --profile web add ./dsh-verbatim-memory-0.2.0.tgz
+dsh plugin --profile web add ./dsh-verbatim-memory-0.3.0.tgz
 ```
 
 Restart the profile so its Host resolves the new package, then add the rows to an **agent preset**. Never edit the shipped `standard`/`cordis`/`ptc`/`minimal` compositions; copy one and edit the copy:
@@ -58,7 +58,40 @@ Because registration is per agent scope, the tools are not global capabilities: 
 
 ## Tools
 
-All three read only the calling session's log, including events whose surface is `shadowed` or `log-only` — the events compaction removed.
+All four read only the calling session's log, including events whose surface is `shadowed` or `log-only` — the events compaction removed.
+
+`memory_list` and `memory_search` share one metadata filter set. A filter array is AND-ed with the phrase; `type`/`surface` values are OR-ed within their clause, and `seq`/`time` bounds are inclusive:
+
+| Parameter | Type | Meaning |
+|---|---|---|
+| `type` | string array, optional | Event types to include, e.g. `["user/message","tool/result"]`. Omit for every type. |
+| `surface` | string array, optional | `current` (in context), `shadowed` (replaced by compaction), or `log-only`. |
+| `seq_from` / `seq_to` | integer, optional | Inclusive event-seq bounds. |
+| `time_from` / `time_to` | integer, optional | Inclusive event-time bounds in Unix epoch milliseconds. |
+| `order` | `asc` \| `desc`, optional | Result order by seq. Defaults to `asc`; `desc` returns the newest matches first. |
+| `offset` | integer, optional | Rows to skip, for paging a result set the header reported as truncated. |
+| `max_chars` | integer, optional | Largest total rendered size before rows are truncated or omitted. Defaults to `defaultOutputChars`. |
+
+### `memory_list`
+
+Enumerate this session's log by metadata alone — no text query. This is the tool for a **set question** ("every message I sent", "all tool results before the compaction"), which a literal search cannot answer in one call.
+
+| Parameter | Type | Meaning |
+|---|---|---|
+| *(filters above)* | | Select the rows. No predicate means every logged event. |
+| `limit` | integer, optional | Maximum rows returned. Defaults to `defaultListResults`. |
+
+Each row carries `[#seq] type @ time surface=…` plus the exact logged text. The header reports the total match count and, when the set is truncated, how to continue:
+
+```text
+2 event(s) matched type=user/message · result set truncated: showing rows 0-1 of 5 · continue with offset 2
+
+[#9] user/message @ 2026-09-09T15:55:32.789Z surface=current
+hi
+
+[#43] user/message @ 2026-09-09T15:55:57.130Z surface=shadowed
+just greeting.
+```
 
 ### `memory_search`
 
@@ -66,6 +99,7 @@ Search this session's log for a literal phrase and return exact matching text wi
 
 | Parameter | Type | Meaning |
 |---|---|---|
+| *(filters above)* | | Narrow the search when the phrase alone is too broad. |
 | `query` | string, required | Literal, case-insensitive phrase; a whitespace run matches one or more whitespace characters. |
 | `limit` | integer, optional | Maximum matches returned. |
 
@@ -121,9 +155,10 @@ Tools used: bash, edit, read
 
 The elided events are unchanged in the session log, and this session's verbatim memory tools are now available.
 Retrieve them exactly:
-  memory_search({ query })
-  memory_read({ seq, before, after })
-  memory_ask({ query })
+  memory_list({ type })   enumerate logged events by type, surface, or seq range
+  memory_search({ query })   find a literal phrase
+  memory_read({ seq, before, after })   read one event in full
+  memory_ask({ query })   budgeted evidence bundle
 Continue from the messages that follow; do not restate this checkpoint.
 ```
 
@@ -137,6 +172,12 @@ Tools entry:
 |---|---:|---|
 | `defaultSearchResults` | `20` | `memory_search` limit when omitted. |
 | `maxSearchResults` | `100` | Largest accepted `limit`, and the `memory_ask` match cap. |
+| `defaultListResults` | `50` | `memory_list` limit when omitted. |
+| `maxListResults` | `500` | Largest accepted `memory_list` limit. |
+| `defaultRowChars` | `280` | Largest exact text block kept per rendered row before a truncation marker. |
+| `maxRowChars` | `4000` | Largest accepted per-row text size. |
+| `defaultOutputChars` | `8000` | Total rendered size of one result set when `max_chars` is omitted. |
+| `maxOutputChars` | `60000` | Largest accepted `max_chars`. |
 | `defaultReadWindow` | `0` | `memory_read` neighbors when omitted. |
 | `maxReadWindow` | `50` | Largest accepted `before`/`after`. |
 | `defaultEvidenceBudget` | `6000` | `memory_ask` token budget when omitted. |
@@ -172,8 +213,8 @@ This package's literal scan needs no index and works on every deployment, includ
 ## Model experience
 
 - **System prompt** — one fixed guidance section (`tool:verbatim-memory`, order 114), present only for sessions whose tools are installed; KV-cache prefix-stable while it is present.
-- **Tool catalog** — zero memory schemas before compaction, three after. The catalog change fires `tools/change`, so the next assembly reflects it.
-- **Tool results** — plain text; the host's spill policy may replace an oversized result with a preview plus a locator, keeping the full text on disk.
+- **Tool catalog** — zero memory schemas before compaction, four after. The catalog change fires `tools/change`, so the next assembly reflects it.
+- **Tool results** — plain text, bounded by the row and total output budgets; oversized rows are truncated at a marker naming the `seq` that reads them in full, and the host's spill policy is the last resort rather than the first.
 - **Compaction** — the replacement checkpoint is metadata and retrieval instructions only, and it names the tools that just became available. Note that the base backend frames every checkpoint with a fixed "condensing an earlier span" preamble; the stub body states explicitly that no summary was generated.
 
 ## Security and privacy
@@ -184,7 +225,8 @@ This package's literal scan needs no index and works on every deployment, includ
 
 ## Known limitations
 
-- **Literal scan, not ranked retrieval** — `memory_search` uses the service's provider-independent literal predicate; it has no relevance ranking, cursors, or tokenizer tuning. Enable FTS5 and the official tool package for ranked cross-session search.
+- **Literal scan, not ranked retrieval** — `memory_search` and `memory_list` use the service's provider-independent predicates: literal text plus `type`/`surface`/`seq`/`time` metadata. There is no relevance ranking or tokenizer tuning. Enable FTS5 and the official tool package for ranked cross-session search.
+- **Metadata predicates need a known vocabulary** — `memory_list({ type })` enumerates types the caller names; the tools do not expose a type histogram, so an unfamiliar log is explored by listing unfiltered rows first.
 - **No embeddings** — the harness ships no embedding provider, so semantic recall is out of scope here.
 - **Whole-log detection on resume** — deciding whether a resumed session compacted reads a snapshot of its log once at agent creation; very large logs pay that cost once.
 - **Fixed checkpoint preamble** — owned by `@deepseek-ai/dsh-compaction-basic`; only the checkpoint body is replaced.

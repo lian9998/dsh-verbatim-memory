@@ -51,10 +51,13 @@ describe('visibility gating', () => {
     harness.emit('session/event', sessionRef(), checkpointEvent())
     const scope = handle.fiber.scope
     expect(scope).toBeDefined()
-    expect([...scope!.tools.keys()].sort()).toEqual(['memory_ask', 'memory_read', 'memory_search'])
+    expect([...scope!.tools.keys()].sort())
+      .toEqual(['memory_ask', 'memory_list', 'memory_read', 'memory_search'])
     expect(scope!.sections).toHaveLength(1)
     expect(scope!.sections[0]?.name).toBe('tool:verbatim-memory')
     expect(scope!.sections[0]?.text).toContain('only this session')
+    expect(scope!.sections[0]?.text).toContain('memory_list')
+    expect(scope!.sections[0]?.text).toContain('subagent_fork')
   })
 
   it('exposes the tools immediately for a resumed compacted session', () => {
@@ -123,8 +126,41 @@ describe('memory tools in a compacted session', () => {
     return scope
   }
 
-  it('registers exactly the three single-session tools', () => {
-    expect([...installed().tools.keys()].sort()).toEqual(['memory_ask', 'memory_read', 'memory_search'])
+  it('registers exactly the four single-session tools', () => {
+    expect([...installed().tools.keys()].sort())
+      .toEqual(['memory_ask', 'memory_list', 'memory_read', 'memory_search'])
+  })
+
+  it('enumerates every user message without a query', async () => {
+    const text = await call(installed(), 'memory_list', { type: ['user/message'] })
+    expect(text).toContain('2 event(s) matched type=user/message')
+    expect(text).toContain('hello world')
+    expect(text).toContain('We chose Postgres because of constraints.')
+    expect(text).toContain('[#1]')
+    expect(text).not.toContain('Later we reversed')
+  })
+
+  it('enumerates without any predicate and reports the total', async () => {
+    const text = await call(installed(), 'memory_list', {})
+    expect(text).toContain('3 event(s) matched all events')
+  })
+
+  it('returns rows newest first when ordered descending', async () => {
+    const text = await call(installed(), 'memory_list', { type: ['user/message'], order: 'desc' })
+    expect(text.indexOf('[#1]')).toBeLessThan(text.indexOf('[#0]'))
+  })
+
+  it('pages a truncated result set with offset', async () => {
+    const text = await call(installed(), 'memory_list', { limit: 1, offset: 1 })
+    expect(text).toContain('3 event(s) matched all events')
+    expect(text).toContain('showing rows 1-1 of 3')
+    expect(text).toContain('continue with offset 2')
+    expect(text).toContain('[#1]')
+  })
+
+  it('rejects an unknown surface filter at the schema boundary', async () => {
+    await expect(call(installed(), 'memory_list', { surface: ['ghost'] }))
+      .rejects.toThrowError(/surface\[0\].*must be one of/)
   })
 
   it('searches this session verbatim', async () => {
@@ -133,6 +169,18 @@ describe('memory tools in a compacted session', () => {
     expect(text).toContain('We chose Postgres because of constraints.')
     expect(text).toContain('Later we reversed the postgres decision.')
     expect(text).toContain('[#1]')
+  })
+
+  it('narrows a search with metadata filters', async () => {
+    const text = await call(installed(), 'memory_search', { query: 'postgres', surface: ['shadowed'] })
+    expect(text).toContain('1 exact match(es)')
+    expect(text).toContain('We chose Postgres because of constraints.')
+    expect(text).not.toContain('Later we reversed')
+  })
+
+  it('bounds rendered output with max_chars', async () => {
+    const text = await call(installed(), 'memory_list', { max_chars: 200 })
+    expect(text).toContain('row(s) omitted to respect the 200-character output budget')
   })
 
   it('rejects an empty literal query', async () => {

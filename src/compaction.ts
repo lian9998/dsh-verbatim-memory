@@ -158,9 +158,10 @@ export function buildVerbatimStub(
     '',
     'The elided events are unchanged in the session log, and this session\'s verbatim memory tools are now available.',
     'Retrieve them exactly:',
-    '  memory_search({ query })',
-    '  memory_read({ seq, before, after })',
-    '  memory_ask({ query })',
+    '  memory_list({ type })   enumerate logged events by type, surface, or seq range',
+    '  memory_search({ query })   find a literal phrase',
+    '  memory_read({ seq, before, after })   read one event in full',
+    '  memory_ask({ query })   budgeted evidence bundle',
     'Continue from the messages that follow; do not restate this checkpoint.',
   )
   const quotes = selectQuotes(region.userTexts, resolved)

@@ -62,6 +62,7 @@ describe('buildVerbatimStub', () => {
     expect(stub).toContain(`Session: ${SESSION}`)
     expect(stub).toContain('3 message(s) — 1 user, 1 assistant, 1 tool result.')
     expect(stub).toContain('Tools used: bash')
+    expect(stub).toContain('memory_list({ type })')
     expect(stub).toContain('memory_search({ query })')
     expect(stub).toContain('memory_read({ seq, before, after })')
     expect(stub).toContain('verbatim memory tools are now available')

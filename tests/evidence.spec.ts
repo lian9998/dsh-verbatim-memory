@@ -6,7 +6,7 @@ import type { ScanOutcome } from '../src/scan.js'
 const SESSION_ID = SessionId('s-self')
 
 function outcome(partial: Partial<ScanOutcome>): ScanOutcome {
-  return { hits: [], truncated: false, ...partial }
+  return { hits: [], matched: 0, offset: 0, truncated: false, ...partial }
 }
 
 describe('estimateTokens', () => {

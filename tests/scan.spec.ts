@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionEventType } from '@deepseek-ai/dsh-session'
 import { readSessionEvent, requireQuery, scanSession } from '../src/scan.js'
 import { fakeHeader, fakeSessionQuery, type FakeSession } from './fake-session-query.js'
 
 const SESSION_ID = SessionId('s-self')
+
+/** Brand fixture event types for the filter contract. */
+function types(...values: string[]): readonly SessionEventType[] {
+  return values as readonly SessionEventType[]
+}
 
 function session(): FakeSession {
   return {
@@ -46,7 +52,63 @@ describe('scanSession', () => {
   it('returns nothing when the phrase is absent', async () => {
     const outcome = await scanSession(fakeSessionQuery(session()), SESSION_ID, 'absent', 10)
     expect(outcome.hits).toEqual([])
+    expect(outcome.matched).toBe(0)
     expect(outcome.truncated).toBe(false)
+  })
+
+  it('enumerates every event when no phrase is supplied', async () => {
+    const outcome = await scanSession(fakeSessionQuery(session()), SESSION_ID, undefined, 10)
+    expect(outcome.hits.map(hit => hit.seq)).toEqual([0, 1, 2])
+    expect(outcome.matched).toBe(3)
+    expect(outcome.truncated).toBe(false)
+    expect(outcome.nextOffset).toBeUndefined()
+  })
+
+  it('ANDs metadata predicates with the phrase', async () => {
+    const outcome = await scanSession(fakeSessionQuery(session()), SESSION_ID, 'postgres', 10, {
+      filters: { surfaces: ['shadowed'] },
+    })
+    expect(outcome.hits.map(hit => hit.seq)).toEqual([1])
+    expect(outcome.matched).toBe(1)
+  })
+
+  it('selects by type without any phrase', async () => {
+    const outcome = await scanSession(fakeSessionQuery(session()), SESSION_ID, undefined, 10, {
+      filters: { types: types('assistant/message') },
+    })
+    expect(outcome.hits.map(hit => hit.seq)).toEqual([2])
+  })
+
+  it('applies inclusive seq and time ranges', async () => {
+    const bySeq = await scanSession(fakeSessionQuery(session()), SESSION_ID, undefined, 10, {
+      filters: { seqFrom: 1, seqTo: 2 },
+    })
+    expect(bySeq.hits.map(hit => hit.seq)).toEqual([1, 2])
+    const byTime = await scanSession(fakeSessionQuery(session()), SESSION_ID, undefined, 10, {
+      filters: { timeFrom: 3 },
+    })
+    expect(byTime.hits.map(hit => hit.seq)).toEqual([2])
+  })
+
+  it('returns the newest matches first when ordered descending', async () => {
+    const outcome = await scanSession(fakeSessionQuery(session()), SESSION_ID, 'postgres', 10, { order: 'desc' })
+    expect(outcome.hits.map(hit => hit.seq)).toEqual([2, 1])
+  })
+
+  it('pages with offset and reports how to continue', async () => {
+    const outcome = await scanSession(fakeSessionQuery(session()), SESSION_ID, undefined, 1, { offset: 1 })
+    expect(outcome.hits.map(hit => hit.seq)).toEqual([1])
+    expect(outcome.matched).toBe(3)
+    expect(outcome.truncated).toBe(true)
+    expect(outcome.nextOffset).toBe(2)
+  })
+
+  it('reports an offset past the end without claiming a continuation', async () => {
+    const outcome = await scanSession(fakeSessionQuery(session()), SESSION_ID, undefined, 10, { offset: 9 })
+    expect(outcome.hits).toEqual([])
+    expect(outcome.matched).toBe(3)
+    expect(outcome.truncated).toBe(false)
+    expect(outcome.offset).toBe(9)
   })
 
   it('refuses to read any session other than the one bound to the service', async () => {

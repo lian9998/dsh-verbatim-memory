@@ -15,6 +15,24 @@ export const DEFAULT_SEARCH_RESULTS = 20
 /** Largest accepted `limit` for `memory_search`. */
 export const DEFAULT_MAX_SEARCH_RESULTS = 100
 
+/** Maximum rows returned by `memory_list` when the caller omits `limit`. */
+export const DEFAULT_LIST_RESULTS = 50
+
+/** Largest accepted `limit` for `memory_list`. */
+export const DEFAULT_MAX_LIST_RESULTS = 500
+
+/** Largest exact text block kept per rendered row before a truncation marker. */
+export const DEFAULT_ROW_CHARS = 280
+
+/** Largest accepted per-row text size. */
+export const DEFAULT_MAX_ROW_CHARS = 4000
+
+/** Total rendered size of one result set before rows are omitted. */
+export const DEFAULT_OUTPUT_CHARS = 8000
+
+/** Largest accepted total rendered size. */
+export const DEFAULT_MAX_OUTPUT_CHARS = 60000
+
 /** Maximum neighboring events returned by `memory_read` when the caller omits `before`/`after`. */
 export const DEFAULT_READ_WINDOW = 0
 
@@ -33,9 +51,12 @@ export const DEFAULT_EXPOSE_AFTER_COMPACTION = true
 /** Model-facing guidance contributed while the memory tools are mounted. */
 export const DEFAULT_PROMPT_GUIDANCE =
   'Earlier events of this session were compacted out of the visible context, but they remain exact in the session log. '
-  + 'Use memory_search to find them verbatim, memory_read to read one raw logged event, and memory_ask for an evidence '
-  + 'bundle of exact excerpts. These tools never summarize and search only this session. '
-  + 'Quote retrieved text as-is and cite its seq.'
+  + 'Use memory_list to enumerate logged events by type, surface, or seq range when the question is a set ("every message I sent"), '
+  + 'memory_search to find a literal phrase, memory_read to expand one event by seq, and memory_ask for a budgeted evidence bundle. '
+  + 'These tools never summarize and read only this session. Quote retrieved text as-is and cite its seq. '
+  + 'When a retrieval is broad enough that its raw hits would dominate this context, delegate it to subagent_fork: '
+  + 'a forked child inherits this session\'s log, including compacted-away events, and gets these same tools, so it can search and report back. '
+  + 'A fresh subagent has no memory tools and cannot read this log, and a fork sees history only up to its own start.'
 
 /** Configurable surface of the memory tools plugin. */
 export interface Config {
@@ -43,6 +64,18 @@ export interface Config {
   defaultSearchResults?: number
   /** Largest accepted `limit` for `memory_search`. */
   maxSearchResults?: number
+  /** Maximum rows returned by `memory_list` when the caller omits `limit`. */
+  defaultListResults?: number
+  /** Largest accepted `limit` for `memory_list`. */
+  maxListResults?: number
+  /** Largest exact text block kept per rendered row. */
+  defaultRowChars?: number
+  /** Largest accepted per-row text size. */
+  maxRowChars?: number
+  /** Total rendered size of one result set when the caller omits `max_chars`. */
+  defaultOutputChars?: number
+  /** Largest accepted total rendered size. */
+  maxOutputChars?: number
   /** Maximum neighboring events returned by `memory_read` when the caller omits `before`/`after`. */
   defaultReadWindow?: number
   /** Largest accepted `before`/`after` for `memory_read`. */
@@ -61,6 +94,12 @@ export interface Config {
 export const Config: z<Config> = z.object({
   defaultSearchResults: z.number().step(1).min(1).default(DEFAULT_SEARCH_RESULTS),
   maxSearchResults: z.number().step(1).min(1).default(DEFAULT_MAX_SEARCH_RESULTS),
+  defaultListResults: z.number().step(1).min(1).default(DEFAULT_LIST_RESULTS),
+  maxListResults: z.number().step(1).min(1).default(DEFAULT_MAX_LIST_RESULTS),
+  defaultRowChars: z.number().step(1).min(1).default(DEFAULT_ROW_CHARS),
+  maxRowChars: z.number().step(1).min(1).default(DEFAULT_MAX_ROW_CHARS),
+  defaultOutputChars: z.number().step(1).min(1).default(DEFAULT_OUTPUT_CHARS),
+  maxOutputChars: z.number().step(1).min(1).default(DEFAULT_MAX_OUTPUT_CHARS),
   defaultReadWindow: z.number().step(1).min(0).default(DEFAULT_READ_WINDOW),
   maxReadWindow: z.number().step(1).min(0).default(DEFAULT_MAX_READ_WINDOW),
   defaultEvidenceBudget: z.number().step(1).min(1).default(DEFAULT_EVIDENCE_BUDGET),
@@ -73,6 +112,12 @@ export const Config: z<Config> = z.object({
 export interface ResolvedConfig {
   readonly defaultSearchResults: number
   readonly maxSearchResults: number
+  readonly defaultListResults: number
+  readonly maxListResults: number
+  readonly rowChars: number
+  readonly maxRowChars: number
+  readonly defaultOutputChars: number
+  readonly maxOutputChars: number
   readonly defaultReadWindow: number
   readonly maxReadWindow: number
   readonly defaultEvidenceBudget: number
@@ -91,6 +136,12 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   const resolved: ResolvedConfig = {
     defaultSearchResults: config.defaultSearchResults ?? DEFAULT_SEARCH_RESULTS,
     maxSearchResults: config.maxSearchResults ?? DEFAULT_MAX_SEARCH_RESULTS,
+    defaultListResults: config.defaultListResults ?? DEFAULT_LIST_RESULTS,
+    maxListResults: config.maxListResults ?? DEFAULT_MAX_LIST_RESULTS,
+    rowChars: config.defaultRowChars ?? DEFAULT_ROW_CHARS,
+    maxRowChars: config.maxRowChars ?? DEFAULT_MAX_ROW_CHARS,
+    defaultOutputChars: config.defaultOutputChars ?? DEFAULT_OUTPUT_CHARS,
+    maxOutputChars: config.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
     defaultReadWindow: config.defaultReadWindow ?? DEFAULT_READ_WINDOW,
     maxReadWindow: config.maxReadWindow ?? DEFAULT_MAX_READ_WINDOW,
     defaultEvidenceBudget: config.defaultEvidenceBudget ?? DEFAULT_EVIDENCE_BUDGET,
@@ -101,6 +152,12 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   const bounds: ReadonlyArray<[string, number]> = [
     ['defaultSearchResults', resolved.defaultSearchResults],
     ['maxSearchResults', resolved.maxSearchResults],
+    ['defaultListResults', resolved.defaultListResults],
+    ['maxListResults', resolved.maxListResults],
+    ['defaultRowChars', resolved.rowChars],
+    ['maxRowChars', resolved.maxRowChars],
+    ['defaultOutputChars', resolved.defaultOutputChars],
+    ['maxOutputChars', resolved.maxOutputChars],
     ['defaultReadWindow', resolved.defaultReadWindow],
     ['maxReadWindow', resolved.maxReadWindow],
     ['defaultEvidenceBudget', resolved.defaultEvidenceBudget],
@@ -113,6 +170,15 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   }
   if (resolved.defaultSearchResults > resolved.maxSearchResults) {
     throw new TypeError('verbatim-memory: defaultSearchResults must not exceed maxSearchResults')
+  }
+  if (resolved.defaultListResults > resolved.maxListResults) {
+    throw new TypeError('verbatim-memory: defaultListResults must not exceed maxListResults')
+  }
+  if (resolved.rowChars > resolved.maxRowChars) {
+    throw new TypeError('verbatim-memory: defaultRowChars must not exceed maxRowChars')
+  }
+  if (resolved.defaultOutputChars > resolved.maxOutputChars) {
+    throw new TypeError('verbatim-memory: defaultOutputChars must not exceed maxOutputChars')
   }
   if (resolved.defaultReadWindow > resolved.maxReadWindow) {
     throw new TypeError('verbatim-memory: defaultReadWindow must not exceed maxReadWindow')
