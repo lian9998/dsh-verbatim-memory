@@ -23,6 +23,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import { scanSession } from './scan.js'
 import type { ScanHit, SessionQueryLike } from './scan.js'
 
@@ -37,11 +38,16 @@ export const RECALL_CHILD_TOOLS = ['memory_list', 'memory_search', 'memory_read'
  * channel. The child's own scope also holds tools `restrict()` cannot remove —
  * the harness's per-agent `subagent` tool — so this list is enforced by a guard
  * rather than by the catalog alone.
+ *
+ * The reserved PTC presentation transport is included because a deployment in
+ * `ptc` or `both` mode reaches every tool through it; the guard still sees each
+ * nested dispatch by its real name and refuses anything outside this list.
  */
 export const RECALL_CHILD_ALLOWED_TOOLS: readonly string[] = [
   ...RECALL_CHILD_TOOLS,
   'memory_ask',
   'structured_output',
+  RUN_CODE_NAME,
 ]
 
 /**

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.4
+
+- **PTC transport allowed** — the recall child's execution allowlist now also
+  permits the reserved `run_code` presentation transport. A deployment running
+  the tool registry in `ptc` or `both` mode reaches every tool through it, so
+  the 0.4.3 guard would have denied the child its own answer channel. Nested
+  dispatches still carry the real tool name and remain subject to the allowlist,
+  so no file or shell tool becomes reachable.
+
 ## 0.4.3
 
 Hardening found by the live end-to-end run: the recall child's catalog is not
