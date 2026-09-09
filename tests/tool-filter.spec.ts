@@ -35,6 +35,8 @@ function probeTool(name: string) {
 
 /** One real registry with a global tool and a child scope holding its own tool. */
 interface Registry {
+  /** The registry itself, for driving executions. */
+  readonly tools: ToolRuntime
   /** The child scope's view of the service: `restrict()` must be called here. */
   readonly childTools: ToolRuntime
   /** The child scope key. */
@@ -45,7 +47,7 @@ interface Registry {
 
 /**
  * Build the registry.
- * @returns the child-scoped service, its key, and a name lister.
+ * @returns the registry service, the child-scoped service, its key, and a name lister.
  */
 function registry(): Registry {
   const root = new Context()
@@ -62,6 +64,7 @@ function registry(): Registry {
   const childKey = scopeOf(scope.ctx)
   if (childKey === undefined) throw new Error('the child scope was not tagged')
   return {
+    tools,
     childTools,
     childKey,
     names: (key?: ScopeKey) => tools.schemas(key).map(schema => schema.name).sort(),
@@ -84,5 +87,29 @@ describe('recall child tool filter', () => {
     const { childTools } = registry()
     expect(() => childTools.restrict({ allow: ['own_probe'] }))
       .toThrowError(/names unknown global tool/)
+  })
+})
+
+describe('recall child execution guard', () => {
+  it('denies a tool outside the allowlist through the real pipeline', async () => {
+    const { tools, childTools, childKey } = registry()
+    childTools.guard(execution => execution.name === 'own_probe'
+      ? undefined
+      : 'this recall child may only use the read-only memory tools')
+
+    const call = async (name: string) => await tools.execute({
+      callId: 'call-1' as never,
+      name,
+      arguments: {},
+      signal: new AbortController().signal,
+      agent: childKey as never,
+    })
+
+    const allowed = await call('own_probe')
+    expect(allowed.isError).toBe(false)
+
+    const denied = await call('global_probe')
+    expect(denied.isError).toBe(true)
+    expect(JSON.stringify(denied)).toContain('this recall child may only use')
   })
 })

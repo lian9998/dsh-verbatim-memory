@@ -8,6 +8,10 @@
   the 0.4.3 guard would have denied the child its own answer channel. Nested
   dispatches still carry the real tool name and remain subject to the allowlist,
   so no file or shell tool becomes reachable.
+- **Execution-path contract test** — `tests/tool-filter.spec.ts` now drives
+  `ToolRuntime.execute` with a scoped guard installed: an allowed tool runs, and
+  a denied one returns `isError` carrying the guard's reason. The live child
+  never attempted a forbidden call, so the denial path is pinned in CI instead.
 
 ## 0.4.3
 
