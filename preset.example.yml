@@ -33,8 +33,12 @@
 # 2. Add the model-facing memory tools. They consume the HOST `sessionQuery`
 #    service and publish nothing, so they sit loose and need no isolate realm.
 #    Wrapping them in a realm of their own would hide that host service.
+#    The row registers no tool immediately: for each agent it installs
+#    memory_search / memory_read / memory_ask in that agent's scope once the
+#    session's log carries a compaction checkpoint. Set exposeAfterCompaction:
+#    false to expose them for every session instead.
 - id: tool-verbatim-memory
   name: 'dsh-verbatim-memory'
   config:
     defaultSearchResults: 20
-    maxSessionsScanned: 60
+    exposeAfterCompaction: true

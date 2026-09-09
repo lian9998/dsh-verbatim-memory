@@ -12,9 +12,6 @@ import type {
   SessionEventSearchDocument,
   SessionEventSurface,
   SessionEventWindow,
-  SessionRecord,
-  SessionResultFilter,
-  SessionTitleObservationResult,
 } from '@deepseek-ai/dsh-session-query'
 import type { SessionQueryLike } from '../src/scan.js'
 
@@ -38,13 +35,7 @@ export interface FakeSession {
   readonly header: SessionHeader
   /** Events in ascending seq order. */
   readonly events: readonly FakeEvent[]
-  /** Optional title. */
-  readonly title?: string
-  /** Whether the id exists live. */
-  readonly live?: boolean
-  /** Whether the id is persisted. */
-  readonly persisted?: boolean
-  /** When set, `filterEvents` rejects for this session. */
+  /** When set, `filterEvents` rejects with this message. */
   readonly failScan?: string
 }
 
@@ -84,63 +75,14 @@ function literalPattern(text: string): RegExp {
   return new RegExp(escaped, 'iu')
 }
 
-/** A minimal but faithful session-query fake. */
-export function fakeSessionQuery(sessions: readonly FakeSession[]): SessionQueryLike {
-  const records = (): SessionRecord[] => sessions.map(session => ({
-    header: session.header,
-    live: session.live ?? false,
-    persisted: session.persisted ?? true,
-  }))
-  const matchSession = (record: SessionRecord, filters: readonly SessionResultFilter[]): boolean =>
-    filters.every((filter) => {
-      switch (filter.kind) {
-        case 'id':
-          return filter.values.includes(record.header.id)
-        case 'cwd':
-          return filter.values.includes(record.header.cwd ?? null)
-        case 'availability':
-          return filter.values.includes(record.live ? 'live' : 'persisted')
-        default:
-          return true
-      }
-    })
+/** A minimal but faithful single-session session-query fake. */
+export function fakeSessionQuery(session: FakeSession): SessionQueryLike {
   return {
-    async listSessions(): Promise<SessionRecord[]> {
-      return records()
-    },
-    async filterSessions(filters: readonly SessionResultFilter[]): Promise<SessionRecord[]> {
-      return records().filter(record => matchSession(record, filters))
-    },
-    async readTitleSnapshots(ids: readonly SessionId[]): Promise<readonly SessionTitleObservationResult[]> {
-      return ids.map((id): SessionTitleObservationResult => {
-        const session = sessions.find(candidate => candidate.header.id === id)
-        if (session === undefined) {
-          return { sessionId: id, status: 'rejected', reason: new Error('missing session') }
-        }
-        return {
-          sessionId: id,
-          status: 'fulfilled',
-          value: {
-            session: session.header,
-            ...session.title === undefined ? {} : {
-              title: {
-                title: session.title,
-                messageSeqs: [],
-                source: { kind: 'user' as const },
-                eventSeq: seq(0),
-                updatedAt: session.header.createdAt,
-              },
-            },
-          },
-        }
-      })
-    },
     async filterEvents(
       id: SessionId,
       filters: readonly SessionEventResultFilter[],
     ): Promise<readonly SessionEventSearchDocument[]> {
-      const session = sessions.find(candidate => candidate.header.id === id)
-      if (session === undefined) return []
+      if (id !== session.header.id) throw new Error(`unknown session ${id}`)
       if (session.failScan !== undefined) throw new Error(session.failScan)
       const text = filters.find(filter => filter.kind === 'text')
       const pattern = text?.kind === 'text' ? literalPattern(text.text) : undefined
@@ -156,8 +98,7 @@ export function fakeSessionQuery(sessions: readonly FakeSession[]): SessionQuery
         }))
     },
     async readEvent(request: SessionEventReadRequest): Promise<SessionEventWindow> {
-      const session = sessions.find(candidate => candidate.header.id === request.sessionId)
-      if (session === undefined) throw new Error('missing session')
+      if (request.sessionId !== session.header.id) throw new Error(`unknown session ${request.sessionId}`)
       const target = session.events.find(event => event.seq === request.seq)
       if (target === undefined) throw new Error('missing event')
       const before = request.before ?? 0

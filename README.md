@@ -1,12 +1,12 @@
 # dsh-verbatim-memory
 
-Verbatim memory for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): exact session-history recall for the model, and a lossless compaction backend that never summarizes.
+Verbatim memory for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): when compaction removes a session's older context, three tools appear that let the model read that context back **exactly as it was logged** — and a lossless compaction backend that never summarizes.
 
 Two Cordis plugins ship in one package:
 
 | Entry | Row name | What it does |
 |---|---|---|
-| `.` | `dsh-verbatim-memory` | Four read-only model tools over the host `ctx.sessionQuery` service: list sessions, literal-search events, read raw events, and build a lossless evidence bundle. |
+| `.` | `dsh-verbatim-memory` | Three read-only model tools over the host `ctx.sessionQuery` service, registered per agent and **hidden until that session has been compacted**. They search only the calling session's own log. |
 | `./compaction` | `dsh-verbatim-memory/compaction` | A `ctx.compaction` backend that inherits pressure measurement, retention, and overflow recovery from `@deepseek-ai/dsh-compaction-basic` but replaces the LLM summarization call with a deterministic retrieval stub. |
 
 The design rule is the whole point: **memory content is never generated.** Indexes, counts, timestamps, and handles may be derived; the text a model reads is always the exact bytes that were logged.
@@ -15,9 +15,10 @@ The design rule is the whole point: **memory content is never generated.** Index
 
 A summarizer is a lossy hop. It can drop a constraint, blur a decision, or invent a fact, and the loss is invisible because the replacement reads like memory. This package keeps the raw session log canonical and gives the model tools that quote it:
 
-- **Verbatim** — every excerpt is source text plus `sessionId` and `seq` provenance.
+- **Verbatim** — every excerpt is source text plus its `seq` and surface classification.
 - **Non-generative** — no tool and no compaction path calls `ctx.llm.stream()`.
-- **Authorized** — a call may read only sessions whose `cwd` exactly equals the caller's; a caller without `cwd` reads only itself.
+- **Session-scoped** — a tool call reads exactly one log: the caller's own session. There is no cross-session surface to misconfigure, and no other session is reachable.
+- **Visible only after compaction** — the tools exist for recovering elided context, so they are registered only once this session's own surface carries a compaction checkpoint. An uncompacted session never sees them, which keeps the tool catalog lean and the intent unambiguous.
 - **Lossless under pressure** — when context pressure forces eviction, the checkpoint records *what was elided and how to retrieve it*, not what it meant.
 
 ## Install
@@ -28,7 +29,7 @@ dsh plugin --profile web add /path/to/dsh-verbatim-memory
 
 # or from a packed tarball
 npm pack
-dsh plugin --profile web add ./dsh-verbatim-memory-0.1.0.tgz
+dsh plugin --profile web add ./dsh-verbatim-memory-0.2.0.tgz
 ```
 
 Restart the profile so its Host resolves the new package, then add the rows to an **agent preset**. Never edit the shipped `standard`/`cordis`/`ptc`/`minimal` compositions; copy one and edit the copy:
@@ -40,39 +41,52 @@ Restart the profile so its Host resolves the new package, then add the rows to a
 
 Merge [`preset.example.yml`](preset.example.yml) into the copy. The compaction row must sit **inside** the existing `compaction` isolate realm (it consumes `toolResultPruner`); the tools row sits loose because it publishes no service.
 
+## Visibility
+
+The tools row registers a standing plugin. It does not register tools directly: it waits for each agent and installs the tools **in that agent's own scope** when the agent's session log contains a compaction checkpoint.
+
+| Moment | Behavior |
+|---|---|
+| Session never compacted | No tools, no prompt section for that agent. |
+| Compaction completes | The checkpoint event is appended; the tools and their guidance appear for that session's next model request. |
+| Session resumed with an existing checkpoint | Tools are present immediately at agent creation. |
+| Agent disposed | The scoped fiber is disposed with it. |
+
+Detection uses `isCompactCheckpointSource` from `@deepseek-ai/dsh-compaction/checkpoint`, so it recognizes the real surface replacement rather than guessing from event names. Set `exposeAfterCompaction: false` to register the tools for every session instead.
+
+Because registration is per agent scope, the tools are not global capabilities: `tools.restrict()` is not needed, another agent's catalog never lists them, and a call can only read the calling session.
+
 ## Tools
 
-### `memory_sessions`
-
-List sessions readable from this workspace with their latest title, `cwd`, creation time, and live/persisted state.
-
-| Parameter | Type | Meaning |
-|---|---|---|
-| `query` | string, optional | Case-insensitive substring matched against titles. |
-| `limit` | integer, optional | Maximum sessions returned. |
+All three read only the calling session's log, including events whose surface is `shadowed` or `log-only` — the events compaction removed.
 
 ### `memory_search`
 
-Search prior session events for a literal phrase and return exact matching text with provenance. Never summarizes. A cross-session scan **excludes the calling session** so a search cannot cite its own transcript.
+Search this session's log for a literal phrase and return exact matching text with `seq` provenance.
 
 | Parameter | Type | Meaning |
 |---|---|---|
 | `query` | string, required | Literal, case-insensitive phrase; a whitespace run matches one or more whitespace characters. |
-| `session_id` | string, optional | Restrict the scan to one authorized session. |
 | `limit` | integer, optional | Maximum matches returned. |
-| `max_sessions` | integer, optional | Maximum sessions scanned in a cross-session search. |
 
 ### `memory_read`
 
-Read one exact event by `session_id` and `seq`, with optional neighboring events. Returns raw logged event JSON, unabridged.
+Read one exact event by `seq`, with optional neighboring events. Returns raw logged event JSON, unabridged.
+
+| Parameter | Type | Meaning |
+|---|---|---|
+| `seq` | integer, required | Event sequence number in this session. |
+| `before` | integer, optional | Neighboring events before the target. |
+| `after` | integer, optional | Neighboring events after the target. |
 
 ### `memory_ask`
 
-Return a deterministic, non-generative evidence bundle: exact excerpts with provenance, explicit gaps, a per-session failure list, and a token estimate.
+Return a deterministic, non-generative evidence bundle: exact excerpts with provenance, explicit gaps, and a token estimate.
 
 ```json
 {
   "query": "why did we choose Postgres",
+  "session_id": "session-abc",
   "results": [
     {
       "id": "session-abc#42",
@@ -86,15 +100,13 @@ Return a deterministic, non-generative evidence bundle: exact excerpts with prov
     }
   ],
   "missing": ["1 exact match(es) omitted to respect budget_tokens=1000"],
-  "scanned_sessions": 3,
-  "skipped": [],
   "truncated": true,
   "token_estimate": 980,
   "budget_tokens": 1000
 }
 ```
 
-Excerpts are whole or absent — the builder never truncates text to fit the budget. `why_relevant` is deliberately absent: relevance is the caller's judgment, and a generated explanation would be non-memory metadata. A curator subagent can forward this bundle without adding a lossy hop.
+Excerpts are whole or absent — the builder never truncates text to fit the budget. `why_relevant` is deliberately absent: relevance is the caller's judgment, and a generated explanation would be non-memory metadata.
 
 ## Verbatim compaction
 
@@ -107,9 +119,10 @@ Session: session-abc
 Elided from the active surface: 214 message(s) — 96 user, 88 assistant, 30 tool result.
 Tools used: bash, edit, read
 
-The elided events are unchanged in the session log. Retrieve them exactly:
+The elided events are unchanged in the session log, and this session's verbatim memory tools are now available.
+Retrieve them exactly:
   memory_search({ query })
-  memory_read({ session_id, seq, before, after })
+  memory_read({ seq, before, after })
   memory_ask({ query })
 Continue from the messages that follow; do not restate this checkpoint.
 ```
@@ -122,16 +135,14 @@ Tools entry:
 
 | Key | Default | Meaning |
 |---|---:|---|
-| `defaultSessionLimit` | `40` | `memory_sessions` limit when omitted. |
-| `maxSessionLimit` | `200` | Largest accepted `limit`. |
 | `defaultSearchResults` | `20` | `memory_search` limit when omitted. |
 | `maxSearchResults` | `100` | Largest accepted `limit`, and the `memory_ask` match cap. |
-| `maxSessionsScanned` | `60` | Sessions scanned per cross-session search. |
 | `defaultReadWindow` | `0` | `memory_read` neighbors when omitted. |
 | `maxReadWindow` | `50` | Largest accepted `before`/`after`. |
 | `defaultEvidenceBudget` | `6000` | `memory_ask` token budget when omitted. |
 | `maxEvidenceBudget` | `60000` | Largest accepted `budget_tokens`. |
-| `promptGuidance` | *(built-in)* | Model-facing guidance contributed while mounted. |
+| `exposeAfterCompaction` | `true` | Keep the tools hidden until this session has been compacted. |
+| `promptGuidance` | *(built-in)* | Model-facing guidance contributed while the tools are visible. |
 
 Compaction entry:
 
@@ -160,21 +171,22 @@ This package's literal scan needs no index and works on every deployment, includ
 
 ## Model experience
 
-- **System prompt** — one fixed guidance section (`tool:verbatim-memory`, order 114) while mounted; KV-cache prefix-stable.
-- **Tool schemas** — four fixed read-only schemas; `memory_sessions` and `memory_read` declare themselves concurrency-safe, the two scan tools do not.
+- **System prompt** — one fixed guidance section (`tool:verbatim-memory`, order 114), present only for sessions whose tools are installed; KV-cache prefix-stable while it is present.
+- **Tool catalog** — zero memory schemas before compaction, three after. The catalog change fires `tools/change`, so the next assembly reflects it.
 - **Tool results** — plain text; the host's spill policy may replace an oversized result with a preview plus a locator, keeping the full text on disk.
-- **Compaction** — the replacement checkpoint is metadata and retrieval instructions only. Note that the base backend frames every checkpoint with a fixed "condensing an earlier span" preamble; the stub body states explicitly that no summary was generated.
+- **Compaction** — the replacement checkpoint is metadata and retrieval instructions only, and it names the tools that just became available. Note that the base backend frames every checkpoint with a fixed "condensing an earlier span" preamble; the stub body states explicitly that no summary was generated.
 
 ## Security and privacy
 
-- Authorization is exact `cwd` equality, matching the harness's own session-query tools. Missing and cross-workspace targets produce the same error, so a tool cannot probe for session existence.
+- The corpus is exactly one session: the caller's. No tool accepts a session id, so cross-session reads are not expressible, let alone authorized.
 - Nothing is deleted or rewritten. The raw session log stays append-only, and the tools are read-only: there is no write, pin, or forget surface in this version.
-- Because the corpus is the session log, anything the log contains is potentially retrievable within its workspace. Treat workspace separation as the privacy boundary it already is.
+- The tools only exist for sessions that compacted, so a fresh session exposes no memory surface at all.
 
 ## Known limitations
 
-- **Literal scan, not ranked retrieval** — `memory_search` uses the service's provider-independent literal predicate; it has no relevance ranking or cursors, and scans at most `maxSessionsScanned` sessions per call. Enable FTS5 and the official tool package for ranked search.
+- **Literal scan, not ranked retrieval** — `memory_search` uses the service's provider-independent literal predicate; it has no relevance ranking, cursors, or tokenizer tuning. Enable FTS5 and the official tool package for ranked cross-session search.
 - **No embeddings** — the harness ships no embedding provider, so semantic recall is out of scope here.
+- **Whole-log detection on resume** — deciding whether a resumed session compacted reads a snapshot of its log once at agent creation; very large logs pay that cost once.
 - **Fixed checkpoint preamble** — owned by `@deepseek-ai/dsh-compaction-basic`; only the checkpoint body is replaced.
 - **Shrink validation still applies** — a verbatim checkpoint must be smaller than the region it replaces, exactly like a summary.
 - **No curated store yet** — no pins, tags, tombstones, or cross-session memory records; the session log *is* the store.

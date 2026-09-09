@@ -1,29 +1,28 @@
 import { describe, expect, it } from 'vitest'
-import {
-  bound,
-  DEFAULT_MAX_READ_WINDOW,
-  DEFAULT_SESSION_LIMIT,
-  resolveConfig,
-} from '../src/config.js'
+import { bound, DEFAULT_SEARCH_RESULTS, resolveConfig } from '../src/config.js'
 
 describe('resolveConfig', () => {
   it('applies the documented defaults', () => {
     const resolved = resolveConfig()
-    expect(resolved.defaultSessionLimit).toBe(DEFAULT_SESSION_LIMIT)
-    expect(resolved.maxReadWindow).toBe(DEFAULT_MAX_READ_WINDOW)
-    expect(resolved.promptGuidance).toContain('never summarize')
+    expect(resolved.defaultSearchResults).toBe(DEFAULT_SEARCH_RESULTS)
+    expect(resolved.exposeAfterCompaction).toBe(true)
+    expect(resolved.promptGuidance).toContain('only this session')
   })
 
   it('honours deployment overrides', () => {
-    const resolved = resolveConfig({ defaultSessionLimit: 5, maxSessionLimit: 10, promptGuidance: 'custom' })
-    expect(resolved.defaultSessionLimit).toBe(5)
-    expect(resolved.maxSessionLimit).toBe(10)
+    const resolved = resolveConfig({
+      defaultSearchResults: 5,
+      maxSearchResults: 10,
+      exposeAfterCompaction: false,
+      promptGuidance: 'custom',
+    })
+    expect(resolved.defaultSearchResults).toBe(5)
+    expect(resolved.maxSearchResults).toBe(10)
+    expect(resolved.exposeAfterCompaction).toBe(false)
     expect(resolved.promptGuidance).toBe('custom')
   })
 
   it('rejects a default above its own maximum', () => {
-    expect(() => resolveConfig({ defaultSessionLimit: 10, maxSessionLimit: 5 }))
-      .toThrowError(/defaultSessionLimit must not exceed maxSessionLimit/)
     expect(() => resolveConfig({ defaultSearchResults: 10, maxSearchResults: 5 }))
       .toThrowError(/defaultSearchResults/)
     expect(() => resolveConfig({ defaultReadWindow: 10, maxReadWindow: 5 }))

@@ -1,24 +1,31 @@
 /**
  * Verbatim memory tools over `ctx.sessionQuery`.
  *
- * The plugin registers four read-only model tools. Every result is exact source
- * text plus provenance; no tool summarizes, paraphrases, or regenerates memory
- * content, and every read is authorized by exact workspace `cwd` equality.
+ * The tools exist for exactly one job: recovering context that compaction
+ * removed from this session. They therefore search only the calling session's
+ * log and stay hidden until that session's own surface carries a compaction
+ * checkpoint. Registration is per agent scope, so a session that never compacted
+ * never sees them, and no tool can read another session.
+ *
+ * Every result is exact source text plus provenance; no tool summarizes,
+ * paraphrases, or regenerates memory content.
  *
  * @module dsh-verbatim-memory
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Fiber } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { callerOf, requireSessionId } from './access.js'
+import { callerOf } from './access.js'
+import { hasCompactionCheckpoint, isCheckpointEvent } from './checkpoint.js'
 import { bound, Config as ConfigSchema, resolveConfig } from './config.js'
 import type { Config as ConfigShape, ResolvedConfig } from './config.js'
 import { buildEvidenceBundle } from './evidence.js'
-import { renderEvidence, renderHits, renderSessions, renderWindow } from './format.js'
-import { listAuthorized, readAuthorized, requireQuery, scan } from './scan.js'
+import { renderEvidence, renderHits, renderWindow } from './format.js'
+import { readSessionEvent, requireQuery, scanSession } from './scan.js'
 
 /** Loader-validated configuration schema for this plugin row. */
 export const Config = ConfigSchema
@@ -29,8 +36,8 @@ export type Config = ConfigShape
 /** Cordis plugin name used by Loader diagnostics. */
 export const name = 'verbatim-memory'
 
-/** Capability services required by this model-facing consumer. */
-export const inject = ['tools', 'systemPrompt', 'sessionQuery']
+/** The standing plugin resolves live agents; each agent's scoped fiber resolves the rest. */
+export const inject = ['agents']
 
 const TEXT_OUTPUT = {
   schema: { type: 'string' as const },
@@ -38,74 +45,46 @@ const TEXT_OUTPUT = {
 }
 
 /**
- * Register the verbatim memory tools and their shared model guidance.
- * @param ctx - plugin context providing `tools`, `systemPrompt`, and `sessionQuery`.
- * @param config - loader-validated configuration.
+ * Register the three memory tools and their guidance in one agent scope.
+ * @param scope - the agent's scoped context, providing `tools`, `systemPrompt`, and `sessionQuery`.
+ * @param resolved - validated configuration.
  */
-export function apply(ctx: Context, config: Config): void {
-  const resolved = resolveConfig(config)
-  ctx.systemPrompt.section({
+export function installMemoryTools(scope: Context, resolved: ResolvedConfig): void {
+  scope.systemPrompt.section({
     name: 'tool:verbatim-memory',
     order: 114,
     text: resolved.promptGuidance,
   })
 
-  ctx.tools.register(defineTool({
-    name: 'memory_sessions',
-    description: 'List sessions readable from this workspace with their latest title, cwd, and creation time.',
-    parameters: {
-      query: { type: 'string', description: 'Optional case-insensitive substring matched against session titles.' },
-      limit: { type: 'integer', description: 'Maximum sessions returned.' },
-    },
-    output: TEXT_OUTPUT,
-    isConcurrencySafe: () => true,
-    execute: async (args, exec) => {
-      const caller = callerOf(exec)
-      const limit = bound(args.limit, resolved.defaultSessionLimit, resolved.maxSessionLimit)
-      const listing = await listAuthorized(ctx.sessionQuery, caller, args.query, limit)
-      return renderSessions(listing.items, listing.total)
-    },
-  }))
-
-  ctx.tools.register(defineTool({
+  scope.tools.register(defineTool({
     name: 'memory_search',
     description:
-      'Search prior session events for a literal phrase and return exact matching text with sessionId and seq provenance. '
-      + 'Never summarizes. The calling session is excluded from a cross-session scan.',
+      'Search this session\'s own event log for a literal phrase and return exact matching text with seq provenance, '
+      + 'including events that compaction removed from the visible context. Never summarizes and never reads another session.',
     parameters: {
       query: {
         type: 'string',
         required: true,
         description: 'Literal, case-insensitive phrase; a whitespace run matches one or more whitespace characters.',
       },
-      session_id: { type: 'string', description: 'Restrict the scan to one authorized session id.' },
       limit: { type: 'integer', description: 'Maximum matches returned.' },
-      max_sessions: { type: 'integer', description: 'Maximum sessions scanned in a cross-session search.' },
     },
     output: TEXT_OUTPUT,
     execute: async (args, exec) => {
       const caller = callerOf(exec)
       const queryText = requireQuery(args.query)
       const limit = bound(args.limit, resolved.defaultSearchResults, resolved.maxSearchResults)
-      const maxSessions = Math.max(1, bound(args.max_sessions, resolved.maxSessionsScanned, resolved.maxSessionsScanned))
-      const outcome = await scan(
-        ctx.sessionQuery,
-        caller,
-        queryText,
-        args.session_id === undefined ? undefined : requireSessionId(args.session_id),
-        limit,
-        maxSessions,
-      )
+      const outcome = await scanSession(scope.sessionQuery, caller.id, queryText, limit)
       return renderHits(queryText, outcome)
     },
   }))
 
-  ctx.tools.register(defineTool({
+  scope.tools.register(defineTool({
     name: 'memory_read',
-    description: 'Read one exact session event by session_id and seq, with optional neighboring events. Returns raw logged event JSON.',
+    description:
+      'Read one exact event from this session by seq, with optional neighboring events. Returns raw logged event JSON.',
     parameters: {
-      session_id: { type: 'string', required: true, description: 'Authorized session id that owns the event.' },
-      seq: { type: 'integer', required: true, description: 'Event sequence number to read.' },
+      seq: { type: 'integer', required: true, description: 'Event sequence number to read in this session.' },
       before: { type: 'integer', description: 'Neighboring events before the target.' },
       after: { type: 'integer', description: 'Neighboring events after the target.' },
     },
@@ -116,10 +95,9 @@ export function apply(ctx: Context, config: Config): void {
       if (!Number.isSafeInteger(args.seq) || args.seq < 0) {
         throw new HarnessError('seq must be a non-negative integer', 'VERBATIM_MEMORY_INVALID_SEQ')
       }
-      const window = await readAuthorized(
-        ctx.sessionQuery,
-        caller,
-        requireSessionId(args.session_id),
+      const window = await readSessionEvent(
+        scope.sessionQuery,
+        caller.id,
         args.seq,
         bound(args.before, resolved.defaultReadWindow, resolved.maxReadWindow),
         bound(args.after, resolved.defaultReadWindow, resolved.maxReadWindow),
@@ -128,11 +106,11 @@ export function apply(ctx: Context, config: Config): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
+  scope.tools.register(defineTool({
     name: 'memory_ask',
     description:
-      'Return a lossless evidence bundle for a memory question: exact excerpts with provenance, explicit gaps, and a token estimate. '
-      + 'Deterministic and non-generative; forward it to another agent without a lossy hop.',
+      'Return a lossless evidence bundle over this session\'s log: exact excerpts with seq provenance, explicit gaps, '
+      + 'and a token estimate. Deterministic and non-generative; forward it without a lossy hop.',
     parameters: {
       query: {
         type: 'string',
@@ -140,25 +118,57 @@ export function apply(ctx: Context, config: Config): void {
         description: 'Literal, case-insensitive phrase to gather evidence for.',
       },
       budget_tokens: { type: 'integer', description: 'Maximum estimated tokens of excerpt text in the bundle.' },
-      session_id: { type: 'string', description: 'Restrict the evidence search to one authorized session id.' },
     },
     output: TEXT_OUTPUT,
     execute: async (args, exec) => {
       const caller = callerOf(exec)
       const queryText = requireQuery(args.query)
       const budget = Math.max(1, bound(args.budget_tokens, resolved.defaultEvidenceBudget, resolved.maxEvidenceBudget))
-      const outcome = await scan(
-        ctx.sessionQuery,
-        caller,
-        queryText,
-        args.session_id === undefined ? undefined : requireSessionId(args.session_id),
-        resolved.maxSearchResults,
-        resolved.maxSessionsScanned,
-      )
-      return renderEvidence(buildEvidenceBundle(queryText, outcome, budget))
+      const outcome = await scanSession(scope.sessionQuery, caller.id, queryText, resolved.maxSearchResults)
+      return renderEvidence(buildEvidenceBundle(queryText, caller.id, outcome, budget))
     },
   }))
 }
 
-/** Resolved configuration type, exported for tests and embedders. */
-export type { ResolvedConfig }
+/**
+ * Expose the memory tools for every live agent that qualifies.
+ *
+ * Registration happens in the agent's own scope, so the tools are absent from
+ * every other agent's catalog and cannot be called across sessions.
+ * @param ctx - standing plugin context.
+ * @param config - loader-validated configuration.
+ */
+export function apply(ctx: Context, config: Config): void {
+  const resolved = resolveConfig(config)
+  const fibers = new Map<Agent, Fiber>()
+
+  const install = (agent: Agent): void => {
+    if (fibers.has(agent)) return
+    if (resolved.exposeAfterCompaction && !hasCompactionCheckpoint(agent.session.snapshotEvents())) return
+    const fiber = agent.ctx.inject(['tools', 'systemPrompt', 'sessionQuery'], (scope) => {
+      installMemoryTools(scope, resolved)
+    })
+    fibers.set(agent, fiber)
+  }
+
+  const uninstall = (agent: Agent): void => {
+    const fiber = fibers.get(agent)
+    if (fiber === undefined) return
+    fibers.delete(agent)
+    void fiber.dispose()
+  }
+
+  for (const agent of ctx.agents.list()) install(agent)
+  ctx.on('agent/created', ({ agent }) => { install(agent) })
+  ctx.on('agent/disposed', ({ agent }) => { uninstall(agent) })
+  ctx.on('session/event', (session, event) => {
+    if (!isCheckpointEvent(event)) return
+    const agent = ctx.agents.get(session.id)
+    if (agent !== undefined) install(agent)
+  })
+  ctx.effect(() => async () => {
+    const pending = [...fibers.values()]
+    fibers.clear()
+    await Promise.all(pending.map(fiber => fiber.dispose()))
+  }, 'verbatim-memory: scoped tool fibers')
+}

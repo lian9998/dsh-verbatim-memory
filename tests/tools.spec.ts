@@ -1,166 +1,186 @@
 import { describe, expect, it } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { apply } from '../src/index.js'
 import type { Config } from '../src/index.js'
-import type { SessionQueryLike } from '../src/scan.js'
+import { fakeAgent, fakeHarness, type FakeHarness, type FakeScope } from './fake-harness.js'
 import { fakeHeader, fakeSessionQuery, type FakeSession } from './fake-session-query.js'
+import { checkpointEvent, userEvent } from './events.js'
 
-interface Registered {
-  readonly ctx: Context
-  readonly tools: Map<string, ToolDefinition>
-  readonly sections: Array<{ name: string; text: string }>
-}
-
-function sessions(): FakeSession[] {
-  return [
-    {
-      header: fakeHeader('s-self', '/w'),
-      live: true,
-      events: [{ seq: 0, type: 'user/message', time: 1, surface: 'current', text: 'hello world' }],
-    },
-    {
-      header: fakeHeader('s-other', '/w', 1_600_000_000_000),
-      title: 'Design notes',
-      events: [
-        { seq: 0, type: 'user/message', time: 1, surface: 'current', text: 'We chose Postgres because of constraints.' },
-        { seq: 1, type: 'assistant/message', time: 2, surface: 'shadowed', text: 'Later we reversed the postgres decision.' },
-      ],
-    },
-    {
-      header: fakeHeader('s-foreign', '/elsewhere'),
-      events: [{ seq: 0, type: 'user/message', time: 1, surface: 'current', text: 'secret postgres note' }],
-    },
-  ]
-}
-
-function register(sessionQuery: SessionQueryLike, config?: Record<string, unknown>): Registered {
-  const tools = new Map<string, ToolDefinition>()
-  const sections: Array<{ name: string; text: string }> = []
-  const ctx = {
-    sessionQuery,
-    tools: {
-      register: (definition: ToolDefinition) => {
-        tools.set(definition.name, definition)
-        return () => tools.delete(definition.name)
-      },
-    },
-    systemPrompt: {
-      section: (section: { name: string; text: string }) => {
-        sections.push(section)
-        return () => undefined
-      },
-    },
-  } as unknown as Context
-  apply(ctx, (config ?? {}) as Config)
-  return { ctx, tools, sections }
+function sessionFixture(): FakeSession {
+  return {
+    header: fakeHeader('s-self', '/w'),
+    events: [
+      { seq: 0, type: 'user/message', time: 1, surface: 'current', text: 'hello world' },
+      { seq: 1, type: 'user/message', time: 2, surface: 'shadowed', text: 'We chose Postgres because of constraints.' },
+      { seq: 2, type: 'assistant/message', time: 3, surface: 'log-only', text: 'Later we reversed the postgres decision.' },
+    ],
+  }
 }
 
 function execution(): ToolRunContext {
-  const header = fakeHeader('s-self', '/w')
-  return { agent: { session: { id: header.id, header } } } as unknown as ToolRunContext
+  return { agent: { session: { id: SessionId('s-self') } } } as unknown as ToolRunContext
 }
 
-async function call(registered: Registered, name: string, args: unknown): Promise<string> {
-  const definition = registered.tools.get(name)
+async function call(scope: FakeScope, name: string, args: unknown): Promise<string> {
+  const definition = scope.tools.get(name)
   if (definition === undefined) throw new Error(`missing tool ${name}`)
-  return await definition.execute(args, execution()) as string
+  return await (definition as ToolDefinition).execute(args, execution()) as string
 }
 
-describe('verbatim memory plugin', () => {
-  it('registers the four tools and its prompt guidance', () => {
-    const registered = register(fakeSessionQuery(sessions()))
-    expect([...registered.tools.keys()].sort())
-      .toEqual(['memory_ask', 'memory_read', 'memory_search', 'memory_sessions'])
-    expect(registered.sections).toHaveLength(1)
-    expect(registered.sections[0]?.name).toBe('tool:verbatim-memory')
-    expect(registered.sections[0]?.text).toContain('never summarize')
+function sessionRef(id = 's-self'): { id: ReturnType<typeof SessionId> } {
+  return { id: SessionId(id) }
+}
+
+describe('visibility gating', () => {
+  it('hides the tools for a session that never compacted', () => {
+    const handle = fakeAgent('s-self', [], fakeSessionQuery(sessionFixture()))
+    const harness = fakeHarness([handle.agent])
+    apply(harness.ctx, {})
+    expect(handle.fiber.scope).toBeUndefined()
   })
 
-  it('honours a custom prompt guidance override', () => {
-    const registered = register(fakeSessionQuery(sessions()), { promptGuidance: 'custom guidance' })
-    expect(registered.sections[0]?.text).toBe('custom guidance')
+  it('exposes the tools once a compaction checkpoint lands', () => {
+    const log: SessionEvent[] = []
+    const handle = fakeAgent('s-self', log, fakeSessionQuery(sessionFixture()))
+    const harness = fakeHarness([handle.agent])
+    apply(harness.ctx, {})
+    expect(handle.fiber.scope).toBeUndefined()
+    log.push(checkpointEvent())
+    harness.emit('session/event', sessionRef(), checkpointEvent())
+    const scope = handle.fiber.scope
+    expect(scope).toBeDefined()
+    expect([...scope!.tools.keys()].sort()).toEqual(['memory_ask', 'memory_read', 'memory_search'])
+    expect(scope!.sections).toHaveLength(1)
+    expect(scope!.sections[0]?.name).toBe('tool:verbatim-memory')
+    expect(scope!.sections[0]?.text).toContain('only this session')
   })
 
-  it('lists only workspace-readable sessions', async () => {
-    const registered = register(fakeSessionQuery(sessions()))
-    const text = await call(registered, 'memory_sessions', {})
-    expect(text).toContain('session: s-self')
-    expect(text).toContain('session: s-other')
-    expect(text).not.toContain('s-foreign')
+  it('exposes the tools immediately for a resumed compacted session', () => {
+    const handle = fakeAgent('s-self', [checkpointEvent()], fakeSessionQuery(sessionFixture()))
+    const harness = fakeHarness([handle.agent])
+    apply(harness.ctx, {})
+    expect(handle.fiber.scope).toBeDefined()
   })
 
-  it('filters sessions by title substring', async () => {
-    const registered = register(fakeSessionQuery(sessions()))
-    const text = await call(registered, 'memory_sessions', { query: 'design' })
-    expect(text).toContain('session: s-other')
-    expect(text).not.toContain('session: s-self')
+  it('installs for an agent created after the plugin mounted', () => {
+    const agents: never[] = []
+    const harness = fakeHarness(agents)
+    apply(harness.ctx, {})
+    const handle = fakeAgent('s-self', [checkpointEvent()], fakeSessionQuery(sessionFixture()))
+    agents.push(handle.agent as never)
+    harness.emit('agent/created', { agent: handle.agent })
+    expect(handle.fiber.scope).toBeDefined()
   })
 
-  it('searches peers verbatim and excludes the caller session', async () => {
-    const registered = register(fakeSessionQuery(sessions()))
-    const text = await call(registered, 'memory_search', { query: 'postgres' })
+  it('ignores non-checkpoint session events', () => {
+    const handle = fakeAgent('s-self', [], fakeSessionQuery(sessionFixture()))
+    const harness = fakeHarness([handle.agent])
+    apply(harness.ctx, {})
+    harness.emit('session/event', sessionRef(), userEvent('hi'))
+    expect(handle.fiber.scope).toBeUndefined()
+  })
+
+  it('ignores a checkpoint for a session with no live agent', () => {
+    const harness = fakeHarness([])
+    apply(harness.ctx, {})
+    expect(() => harness.emit('session/event', sessionRef('s-gone'), checkpointEvent())).not.toThrow()
+  })
+
+  it('installs at mount when exposeAfterCompaction is disabled', () => {
+    const handle = fakeAgent('s-self', [], fakeSessionQuery(sessionFixture()))
+    const harness = fakeHarness([handle.agent])
+    apply(harness.ctx, { exposeAfterCompaction: false })
+    expect(handle.fiber.scope).toBeDefined()
+  })
+
+  it('disposes the scoped fiber when the agent is disposed', () => {
+    const handle = fakeAgent('s-self', [checkpointEvent()], fakeSessionQuery(sessionFixture()))
+    const harness = fakeHarness([handle.agent])
+    apply(harness.ctx, {})
+    harness.emit('agent/disposed', { agent: handle.agent })
+    expect(handle.fiber.disposed).toBe(true)
+  })
+
+  it('disposes every scoped fiber when the plugin unloads', async () => {
+    const handle = fakeAgent('s-self', [checkpointEvent()], fakeSessionQuery(sessionFixture()))
+    const harness = fakeHarness([handle.agent])
+    apply(harness.ctx, {})
+    expect(harness.effects).toHaveLength(1)
+    await harness.effects[0]!()
+    expect(handle.fiber.disposed).toBe(true)
+  })
+})
+
+describe('memory tools in a compacted session', () => {
+  function installed(config?: Config): FakeScope {
+    const handle = fakeAgent('s-self', [checkpointEvent()], fakeSessionQuery(sessionFixture()))
+    const harness: FakeHarness = fakeHarness([handle.agent])
+    apply(harness.ctx, config ?? {})
+    const scope = handle.fiber.scope
+    if (scope === undefined) throw new Error('tools were not installed')
+    return scope
+  }
+
+  it('registers exactly the three single-session tools', () => {
+    expect([...installed().tools.keys()].sort()).toEqual(['memory_ask', 'memory_read', 'memory_search'])
+  })
+
+  it('searches this session verbatim', async () => {
+    const text = await call(installed(), 'memory_search', { query: 'postgres' })
     expect(text).toContain('2 exact match(es)')
     expect(text).toContain('We chose Postgres because of constraints.')
     expect(text).toContain('Later we reversed the postgres decision.')
-    expect(text).not.toContain('secret postgres note')
-    expect(text).toContain('[s-other#0]')
-  })
-
-  it('searches the caller session when named explicitly', async () => {
-    const registered = register(fakeSessionQuery(sessions()))
-    const text = await call(registered, 'memory_search', { query: 'hello', session_id: 's-self' })
-    expect(text).toContain('hello world')
-  })
-
-  it('denies a foreign session', async () => {
-    const registered = register(fakeSessionQuery(sessions()))
-    await expect(call(registered, 'memory_search', { query: 'postgres', session_id: 's-foreign' }))
-      .rejects.toThrowError(/not readable from this workspace/)
+    expect(text).toContain('[#1]')
   })
 
   it('rejects an empty literal query', async () => {
-    const registered = register(fakeSessionQuery(sessions()))
-    await expect(call(registered, 'memory_search', { query: '   ' }))
+    await expect(call(installed(), 'memory_search', { query: '   ' }))
       .rejects.toThrowError(/at least one non-whitespace/)
   })
 
   it('reads one exact event as raw JSON', async () => {
-    const registered = register(fakeSessionQuery(sessions()))
-    const text = await call(registered, 'memory_read', { session_id: 's-other', seq: 1, before: 1 })
-    expect(text).toContain('session s-other')
-    expect(text).toContain('#1 assistant/message')
+    const text = await call(installed(), 'memory_read', { seq: 2, before: 1 })
+    expect(text).toContain('session s-self')
+    expect(text).toContain('#2 assistant/message')
     expect(text).toContain('"text": "Later we reversed the postgres decision."')
   })
 
   it('rejects a negative seq before reaching the service', async () => {
-    const registered = register(fakeSessionQuery(sessions()))
-    await expect(call(registered, 'memory_read', { session_id: 's-other', seq: -1 }))
+    await expect(call(installed(), 'memory_read', { seq: -1 }))
       .rejects.toThrowError(/seq must be a non-negative integer/)
   })
 
-  it('returns a lossless evidence bundle', async () => {
-    const registered = register(fakeSessionQuery(sessions()))
-    const text = await call(registered, 'memory_ask', { query: 'postgres', budget_tokens: 1000 })
+  it('returns a lossless evidence bundle bound to this session', async () => {
+    const text = await call(installed(), 'memory_ask', { query: 'postgres', budget_tokens: 1000 })
     const bundle = JSON.parse(text) as {
       query: string
+      session_id: string
       results: Array<{ id: string; exact_text: string }>
       missing: string[]
       token_estimate: number
     }
     expect(bundle.query).toBe('postgres')
-    expect(bundle.results.map(item => item.id)).toEqual(['s-other#0', 's-other#1'])
+    expect(bundle.session_id).toBe('s-self')
+    expect(bundle.results.map(item => item.id)).toEqual(['s-self#1', 's-self#2'])
     expect(bundle.results[0]?.exact_text).toBe('We chose Postgres because of constraints.')
     expect(bundle.missing).toEqual([])
     expect(bundle.token_estimate).toBeGreaterThan(0)
   })
 
   it('reports gaps in the evidence bundle', async () => {
-    const registered = register(fakeSessionQuery(sessions()))
-    const text = await call(registered, 'memory_ask', { query: 'absent-topic' })
+    const text = await call(installed(), 'memory_ask', { query: 'absent-topic' })
     const bundle = JSON.parse(text) as { results: unknown[]; missing: string[] }
     expect(bundle.results).toEqual([])
     expect(bundle.missing[0]).toContain('no literal match')
+  })
+
+  it('refuses a call that is not agent-bound', async () => {
+    const scope = installed()
+    const definition = scope.tools.get('memory_search')
+    if (definition === undefined) throw new Error('missing tool')
+    await expect(definition.execute({ query: 'x' }, {} as ToolRunContext))
+      .rejects.toThrowError(/agent-bound caller/)
   })
 })

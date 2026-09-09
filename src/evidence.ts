@@ -9,13 +9,14 @@
  * @module dsh-verbatim-memory/evidence
  */
 
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ScanHit, ScanOutcome } from './scan.js'
 
 /** One exact excerpt with its provenance. */
 export interface EvidenceItem {
   /** Stable `sessionId#seq` handle for a follow-up `memory_read`. */
   readonly id: string
-  /** Session that owns the excerpt. */
+  /** Session that owns the excerpt; always the calling session. */
   readonly session_id: string
   /** Event sequence number inside that session. */
   readonly seq: number
@@ -35,14 +36,12 @@ export interface EvidenceItem {
 export interface EvidenceBundle {
   /** The caller's original query. */
   readonly query: string
+  /** The calling session whose log was searched. */
+  readonly session_id: string
   /** Exact excerpts that fit the token budget. */
   readonly results: readonly EvidenceItem[]
   /** Explicit gaps: nothing found, or excerpts dropped for budget. */
   readonly missing: readonly string[]
-  /** Number of authorized sessions scanned. */
-  readonly scanned_sessions: number
-  /** Per-session read failures, reported without failing the request. */
-  readonly skipped: readonly string[]
   /** Whether the budget or the match limit stopped the bundle early. */
   readonly truncated: boolean
   /** Estimated tokens across the returned excerpts. */
@@ -61,14 +60,16 @@ export function estimateTokens(text: string): number {
 }
 
 /**
- * Build a lossless evidence bundle from one scan.
+ * Build a lossless evidence bundle from one single-session scan.
  * @param query - the caller's original query text.
- * @param outcome - matches and diagnostics from the literal scan.
+ * @param sessionId - the calling session whose log was searched.
+ * @param outcome - matches and truncation state from the literal scan.
  * @param budgetTokens - maximum estimated tokens of excerpt text.
  * @returns the evidence bundle, with dropped matches reported as gaps.
  */
 export function buildEvidenceBundle(
   query: string,
+  sessionId: SessionId,
   outcome: ScanOutcome,
   budgetTokens: number,
 ): EvidenceBundle {
@@ -83,20 +84,19 @@ export function buildEvidenceBundle(
       continue
     }
     tokenEstimate += cost
-    results.push(toItem(hit, query))
+    results.push(toItem(hit, sessionId, query))
   }
   if (outcome.hits.length === 0) {
-    missing.push(`no literal match for ${JSON.stringify(query)} in the authorized corpus`)
+    missing.push(`no literal match for ${JSON.stringify(query)} in this session's log`)
   }
   if (dropped > 0) {
     missing.push(`${dropped} exact match(es) omitted to respect budget_tokens=${budgetTokens}`)
   }
   return {
     query,
+    session_id: sessionId,
     results,
     missing,
-    scanned_sessions: outcome.scannedSessions,
-    skipped: outcome.skipped,
     truncated: outcome.truncated || dropped > 0,
     token_estimate: tokenEstimate,
     budget_tokens: budgetTokens,
@@ -104,10 +104,10 @@ export function buildEvidenceBundle(
 }
 
 /** Project one scan hit into an evidence item. */
-function toItem(hit: ScanHit, query: string): EvidenceItem {
+function toItem(hit: ScanHit, sessionId: SessionId, query: string): EvidenceItem {
   return {
-    id: `${hit.sessionId}#${hit.seq}`,
-    session_id: hit.sessionId,
+    id: `${sessionId}#${hit.seq}`,
+    session_id: sessionId,
     seq: hit.seq,
     type: hit.type,
     time: new Date(hit.time).toISOString(),

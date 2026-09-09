@@ -156,9 +156,10 @@ export function buildVerbatimStub(
   if (region.toolNames.length > 0) lines.push(`Tools used: ${region.toolNames.join(', ')}`)
   lines.push(
     '',
-    'The elided events are unchanged in the session log. Retrieve them exactly:',
+    'The elided events are unchanged in the session log, and this session\'s verbatim memory tools are now available.',
+    'Retrieve them exactly:',
     '  memory_search({ query })',
-    '  memory_read({ session_id, seq, before, after })',
+    '  memory_read({ seq, before, after })',
     '  memory_ask({ query })',
     'Continue from the messages that follow; do not restate this checkpoint.',
   )
