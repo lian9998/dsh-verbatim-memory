@@ -11,9 +11,12 @@ registry refuses to restrict.
   registered in the child's own scope, so every start failed with
   `tools.restrict() names unknown global tools …`. The filter is now
   `{ allow: [] }`: a restriction never applies to the scope's own registrations,
-  so the child keeps exactly its scoped tools — the read-only memory tools plus
-  the delegation runtime's `structured_output` — and inherits none of the
-  deployment's globals or the parent's preset plane.
+  so the child keeps exactly its scoped tools — the read-only memory tools, the
+  delegation runtime's `structured_output`, and the harness's per-agent
+  `subagent` tool — and inherits none of the deployment's globals or the
+  parent's preset plane. Verified live: the child's own request header listed
+  exactly those six tools, and its ten calls were `memory_search` ×5,
+  `memory_read` ×3, `memory_list` ×1, `structured_output` ×1.
 - **No recursive catalog entry** — `memory_recall` is no longer registered for a
   subagent child, so the child's catalog holds only the read-only tools. The
   in-body refusal stays as the second guard.
