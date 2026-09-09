@@ -15,6 +15,7 @@ import { DEFAULT_OUTPUT_CHARS, DEFAULT_ROW_CHARS } from './config.js'
 import type { EvidenceBundle } from './evidence.js'
 import type { ScanFilters } from './filters.js'
 import { describeFilters } from './filters.js'
+import type { RecallOutcome } from './recall.js'
 import type { ScanHit, ScanOutcome } from './scan.js'
 
 /** Output budget applied to one rendered result set. */
@@ -86,6 +87,49 @@ export function renderWindow(window: SessionEventWindow): string {
  */
 export function renderEvidence(bundle: EvidenceBundle): string {
   return JSON.stringify(bundle, null, 2)
+}
+
+/**
+ * Render one recall outcome: the child's labeled hint plus verified excerpts.
+ *
+ * The answer line is explicitly marked unverified because it is the only
+ * generative artifact in this plugin; everything under "verified excerpts" was
+ * re-read from the calling session's own log at the seq the child named.
+ * @param outcome - the recall outcome.
+ * @param budget - output bound applied to the rendered block.
+ * @returns the model-facing block.
+ */
+export function renderRecall(outcome: RecallOutcome, budget: RenderBudget = DEFAULT_BUDGET): string {
+  const lines = [`recall: ${outcome.question}`, `status: ${outcome.status}`]
+  if (outcome.answer !== undefined) lines.push(`child answer (unverified): ${outcome.answer}`)
+  if (outcome.queries.length > 0) {
+    lines.push(`child queries: ${outcome.queries.map(query => JSON.stringify(query)).join(', ')}`)
+  }
+  if (outcome.note !== undefined) lines.push(`note: ${outcome.note}`)
+  const dropped = outcome.rejected === 0
+    ? ''
+    : `…${outcome.rejected} pair(s) dropped: the child's seq/quote did not match this session's log.`
+  if (outcome.evidence.length === 0) {
+    lines.push(
+      '',
+      'No verified excerpt: the child returned no usable pointer into this session\'s log.',
+      'Retry with different wording, or ask the user which event they mean.',
+    )
+    if (dropped.length > 0) lines.push('', dropped)
+    return lines.join('\n')
+  }
+  const header = [
+    ...lines,
+    '',
+    'Verified excerpts (exact logged text, re-read from this session at the child\'s seqs):',
+  ].join('\n')
+  const body = renderRowBlock(header, {
+    hits: outcome.evidence,
+    matched: outcome.evidence.length,
+    offset: 0,
+    truncated: false,
+  }, budget)
+  return dropped.length === 0 ? body : `${body}\n\n${dropped}`
 }
 
 /**

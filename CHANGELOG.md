@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0
+
+Delegated recall: the one question a literal scan cannot answer is now a tool
+call instead of a hand-rolled fork.
+
+- **`memory_recall` (new)** — ask a question whose wording you cannot guess
+  ("is she angry?"). The plugin starts a child agent through `ctx.subagents`
+  (default provider `fork`) with `maxDepth: 1` and a tool filter that leaves it
+  only `memory_list`, `memory_search`, and `memory_read`, and asks it for one
+  line plus `{seq, quote}` pairs.
+- **Verified evidence, not the child's copy** — every pair is re-read from the
+  calling session's own log; a pair is kept only when the quoted text really
+  occurs at the named seq, and the rendered excerpt is the exact logged text.
+  The child's sentence is labeled `child answer (unverified)` and never used as
+  evidence. Status is `found`, `empty`, `unverified`, `cancelled`, or `error`.
+- **No archive replay** — a fork seed classifies inherited events `shadowed`, so
+  the child receives the log as data rather than as prompt context. The cost of
+  a recall is the child's search loop, not the size of the archive.
+- **Guards** — the tool is not registered without a subagent runtime or when
+  `recallEnabled` is false, is refused to a seeded child session, and is bounded
+  by `recallTimeoutMs` (a timeout disposes the child and reports `cancelled`).
+- **Config** — `recallEnabled`, `recallProvider`, `recallSeqs`, `maxRecallSeqs`,
+  `recallTimeoutMs`, `maxRecallTimeoutMs`, plus a per-call `max_seqs`.
+- **Guidance and checkpoint hints** — the prompt section and the checkpoint stub
+  now point the associative question at `memory_recall`.
+
 ## 0.3.0
 
 Retrieval-surface change: a set question no longer requires guessing substrings,

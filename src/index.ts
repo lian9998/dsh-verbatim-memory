@@ -7,8 +7,12 @@
  * checkpoint. Registration is per agent scope, so a session that never compacted
  * never sees them, and no tool can read another session.
  *
- * Every result is exact source text plus provenance; no tool summarizes,
- * paraphrases, or regenerates memory content.
+ * Every result is exact source text plus provenance. No tool summarizes,
+ * paraphrases, or regenerates memory content. `memory_recall` is the one
+ * apparent exception: it starts a child agent to search for a question whose
+ * wording the caller cannot guess, but the child's prose is returned explicitly
+ * labeled unverified and every excerpt it points at is re-read from this
+ * session's own log before it reaches the caller.
  *
  * @module dsh-verbatim-memory
  */
@@ -25,8 +29,14 @@ import { bound, Config as ConfigSchema, resolveConfig } from './config.js'
 import type { Config as ConfigShape, ResolvedConfig } from './config.js'
 import { buildEvidenceBundle } from './evidence.js'
 import { parseFilters, SURFACE_VALUES } from './filters.js'
-import { renderEvidence, renderHits, renderRows, renderWindow } from './format.js'
+import { renderEvidence, renderHits, renderRecall, renderRows, renderWindow } from './format.js'
 import type { RenderBudget } from './format.js'
+import {
+  isSeededChild,
+  requireQuestion,
+  resolveSubagents,
+  runRecall,
+} from './recall.js'
 import { readSessionEvent, requireQuery, scanSession } from './scan.js'
 
 /** Loader-validated configuration schema for this plugin row. */
@@ -97,7 +107,7 @@ function budgetOf(rawMaxChars: unknown, resolved: ResolvedConfig): RenderBudget 
 }
 
 /**
- * Register the four memory tools and their guidance in one agent scope.
+ * Register the memory tools and their guidance in one agent scope.
  * @param scope - the agent's scoped context, providing `tools`, `systemPrompt`, and `sessionQuery`.
  * @param resolved - validated configuration.
  */
@@ -212,6 +222,61 @@ export function installMemoryTools(scope: Context, resolved: ResolvedConfig): vo
       const budget = Math.max(1, bound(args.budget_tokens, resolved.defaultEvidenceBudget, resolved.maxEvidenceBudget))
       const outcome = await scanSession(scope.sessionQuery, caller.id, queryText, resolved.maxSearchResults)
       return renderEvidence(buildEvidenceBundle(queryText, caller.id, outcome, budget))
+    },
+  }))
+
+  // Recall is optional: it needs a subagent runtime, and the other four tools
+  // must keep working when a deployment has none.
+  const subagents = resolveSubagents(scope)
+  if (!resolved.recallEnabled || subagents === undefined) return
+
+  scope.tools.register(defineTool({
+    name: 'memory_recall',
+    description:
+      'Ask a question whose exact wording you do not know — "is she angry?", "what did we decide about the sign convention?" — '
+      + 'against this session\'s log. Starts a child agent that inherits the log, searches it with the read-only memory tools, '
+      + 'and returns one line plus the seq/quote pairs it relied on. Every excerpt is re-read from this session at the named seq, '
+      + 'and a pair that does not match is dropped, so the excerpts are exact evidence. The one-line answer is generative and is '
+      + 'labeled unverified: never quote it as fact. Prefer memory_search when you can name the literal phrase.',
+    parameters: {
+      question: {
+        type: 'string',
+        required: true,
+        description: 'The associative question to answer from this session\'s log.',
+      },
+      max_seqs: {
+        type: 'integer',
+        description: 'Maximum evidence pairs accepted from the child. Defaults to the deployment budget.',
+      },
+      max_chars: {
+        type: 'integer',
+        description: 'Largest total rendered size before rows are truncated or omitted. Defaults to the deployment budget.',
+      },
+    },
+    output: TEXT_OUTPUT,
+    execute: async (args, exec) => {
+      const caller = callerOf(exec)
+      const question = requireQuestion(args.question)
+      // callerOf already rejected an agent-less execution.
+      const parent = exec.agent as Agent
+      if (isSeededChild(parent.session.snapshotEvents())) {
+        throw new HarnessError(
+          'memory_recall is unavailable to a subagent; a recall child has the read-only memory tools instead',
+          'VERBATIM_MEMORY_RECURSIVE_RECALL',
+        )
+      }
+      const outcome = await runRecall({
+        subagents,
+        provider: resolved.recallProvider,
+        query: scope.sessionQuery,
+        sessionId: caller.id,
+        parent,
+        signal: exec.signal,
+        question,
+        maxSeqs: bound(args.max_seqs, resolved.defaultRecallSeqs, resolved.maxRecallSeqs),
+        timeoutMs: resolved.recallTimeoutMs,
+      })
+      return renderRecall(outcome, budgetOf(args.max_chars, resolved))
     },
   }))
 }

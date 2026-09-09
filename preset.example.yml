@@ -34,11 +34,18 @@
 #    service and publish nothing, so they sit loose and need no isolate realm.
 #    Wrapping them in a realm of their own would hide that host service.
 #    The row registers no tool immediately: for each agent it installs
-#    memory_search / memory_read / memory_ask in that agent's scope once the
-#    session's log carries a compaction checkpoint. Set exposeAfterCompaction:
-#    false to expose them for every session instead.
+#    memory_list / memory_search / memory_read / memory_ask in that agent's scope
+#    once the session's log carries a compaction checkpoint, plus memory_recall
+#    when a subagent runtime is reachable. Set exposeAfterCompaction: false to
+#    expose them for every session instead.
 - id: tool-verbatim-memory
   name: 'dsh-verbatim-memory'
   config:
     defaultSearchResults: 20
     exposeAfterCompaction: true
+    # memory_recall starts one child per call through this provider, with only
+    # the read-only memory tools and a wall-clock budget.
+    recallEnabled: true
+    recallProvider: fork
+    recallSeqs: 8
+    recallTimeoutMs: 120000

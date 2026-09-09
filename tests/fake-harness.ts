@@ -8,6 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { SubagentsLike } from '../src/recall.js'
 import type { SessionQueryLike } from '../src/scan.js'
 
 /** The scoped contributions one fake fiber observes. */
@@ -18,6 +19,8 @@ export interface FakeScope {
   readonly sections: Array<{ name: string; order: number; text: string }>
   /** The session-query service this scope resolves. */
   readonly sessionQuery: SessionQueryLike
+  /** The optional subagent runtime this scope resolves. */
+  readonly subagents?: SubagentsLike
 }
 
 /** One fake agent-scoped fiber. */
@@ -55,9 +58,15 @@ export interface FakeHarness {
  * @param id - session id.
  * @param events - the session's raw log.
  * @param sessionQuery - service resolved inside the scope.
+ * @param subagents - optional subagent runtime resolved inside the scope.
  * @returns the agent and its fiber record.
  */
-export function fakeAgent(id: string, events: readonly SessionEvent[], sessionQuery: SessionQueryLike): FakeAgentHandle {
+export function fakeAgent(
+  id: string,
+  events: readonly SessionEvent[],
+  sessionQuery: SessionQueryLike,
+  subagents?: SubagentsLike,
+): FakeAgentHandle {
   const fiber: FakeFiber = {
     disposed: false,
     scope: undefined,
@@ -69,6 +78,7 @@ export function fakeAgent(id: string, events: readonly SessionEvent[], sessionQu
     tools: new Map<string, ToolDefinition>(),
     sections: [],
     sessionQuery,
+    ...subagents === undefined ? {} : { subagents },
   })
   const agent = {
     session: { id: id as SessionId, snapshotEvents: () => events },
@@ -77,6 +87,7 @@ export function fakeAgent(id: string, events: readonly SessionEvent[], sessionQu
         const scope = scopeOf()
         fiber.scope = scope
         const scoped = {
+          get: (name: string) => name === 'subagents' ? subagents : undefined,
           tools: {
             register: (definition: ToolDefinition) => {
               scope.tools.set(definition.name, definition)

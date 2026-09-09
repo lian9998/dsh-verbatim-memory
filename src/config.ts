@@ -48,12 +48,33 @@ export const DEFAULT_MAX_EVIDENCE_BUDGET = 60000
 /** Whether the tools stay hidden until the owning session has been compacted. */
 export const DEFAULT_EXPOSE_AFTER_COMPACTION = true
 
+/** Whether `memory_recall` is registered when a subagent runtime is available. */
+export const DEFAULT_RECALL_ENABLED = true
+
+/** Subagent provider `memory_recall` starts its child through. */
+export const DEFAULT_RECALL_PROVIDER = 'fork'
+
+/** Maximum evidence pairs accepted from one recall child. */
+export const DEFAULT_RECALL_SEQS = 8
+
+/** Largest accepted `max_seqs` for `memory_recall`. */
+export const DEFAULT_MAX_RECALL_SEQS = 32
+
+/** Wall-clock budget for one recall child, in milliseconds. */
+export const DEFAULT_RECALL_TIMEOUT_MS = 120_000
+
+/** Largest accepted recall timeout, in milliseconds. */
+export const DEFAULT_MAX_RECALL_TIMEOUT_MS = 900_000
+
 /** Model-facing guidance contributed while the memory tools are mounted. */
 export const DEFAULT_PROMPT_GUIDANCE =
   'Earlier events of this session were compacted out of the visible context, but they remain exact in the session log. '
   + 'Use memory_list to enumerate logged events by type, surface, or seq range when the question is a set ("every message I sent"), '
   + 'memory_search to find a literal phrase, memory_read to expand one event by seq, and memory_ask for a budgeted evidence bundle. '
-  + 'These tools never summarize and read only this session. Quote retrieved text as-is and cite its seq. '
+  + 'When you cannot name the words the log would contain — "is she angry?", "what did we decide about the sign convention?" — '
+  + 'call memory_recall({ question }): it starts a child that inherits this session\'s log, lets it search, and returns verified excerpts '
+  + 'with their seqs plus its own one-line answer, which is explicitly unverified and must not be quoted as fact. '
+  + 'These tools never summarize their own results and read only this session. Quote retrieved text as-is and cite its seq. '
   + 'When a retrieval is broad enough that its raw hits would dominate this context, delegate it to subagent_fork: '
   + 'a forked child inherits this session\'s log, including compacted-away events, and gets these same tools, so it can search and report back. '
   + 'A fresh subagent has no memory tools and cannot read this log, and a fork sees history only up to its own start.'
@@ -86,6 +107,18 @@ export interface Config {
   maxEvidenceBudget?: number
   /** Keep the tools hidden until the owning session has been compacted. Defaults to `true`. */
   exposeAfterCompaction?: boolean
+  /** Register `memory_recall` when a subagent runtime is available. Defaults to `true`. */
+  recallEnabled?: boolean
+  /** Subagent provider `memory_recall` starts its child through. Defaults to `fork`. */
+  recallProvider?: string
+  /** Maximum evidence pairs accepted from one recall child. */
+  recallSeqs?: number
+  /** Largest accepted `max_seqs` for `memory_recall`. */
+  maxRecallSeqs?: number
+  /** Wall-clock budget for one recall child, in milliseconds. */
+  recallTimeoutMs?: number
+  /** Largest accepted recall timeout, in milliseconds. */
+  maxRecallTimeoutMs?: number
   /** Model-facing guidance contributed while these tools are visible. */
   promptGuidance?: string
 }
@@ -105,6 +138,12 @@ export const Config: z<Config> = z.object({
   defaultEvidenceBudget: z.number().step(1).min(1).default(DEFAULT_EVIDENCE_BUDGET),
   maxEvidenceBudget: z.number().step(1).min(1).default(DEFAULT_MAX_EVIDENCE_BUDGET),
   exposeAfterCompaction: z.boolean().default(DEFAULT_EXPOSE_AFTER_COMPACTION),
+  recallEnabled: z.boolean().default(DEFAULT_RECALL_ENABLED),
+  recallProvider: z.string().default(DEFAULT_RECALL_PROVIDER),
+  recallSeqs: z.number().step(1).min(1).default(DEFAULT_RECALL_SEQS),
+  maxRecallSeqs: z.number().step(1).min(1).default(DEFAULT_MAX_RECALL_SEQS),
+  recallTimeoutMs: z.number().step(1).min(1).default(DEFAULT_RECALL_TIMEOUT_MS),
+  maxRecallTimeoutMs: z.number().step(1).min(1).default(DEFAULT_MAX_RECALL_TIMEOUT_MS),
   promptGuidance: z.string().default(DEFAULT_PROMPT_GUIDANCE),
 })
 
@@ -123,6 +162,12 @@ export interface ResolvedConfig {
   readonly defaultEvidenceBudget: number
   readonly maxEvidenceBudget: number
   readonly exposeAfterCompaction: boolean
+  readonly recallEnabled: boolean
+  readonly recallProvider: string
+  readonly defaultRecallSeqs: number
+  readonly maxRecallSeqs: number
+  readonly recallTimeoutMs: number
+  readonly maxRecallTimeoutMs: number
   readonly promptGuidance: string
 }
 
@@ -147,6 +192,12 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     defaultEvidenceBudget: config.defaultEvidenceBudget ?? DEFAULT_EVIDENCE_BUDGET,
     maxEvidenceBudget: config.maxEvidenceBudget ?? DEFAULT_MAX_EVIDENCE_BUDGET,
     exposeAfterCompaction: config.exposeAfterCompaction ?? DEFAULT_EXPOSE_AFTER_COMPACTION,
+    recallEnabled: config.recallEnabled ?? DEFAULT_RECALL_ENABLED,
+    recallProvider: config.recallProvider ?? DEFAULT_RECALL_PROVIDER,
+    defaultRecallSeqs: config.recallSeqs ?? DEFAULT_RECALL_SEQS,
+    maxRecallSeqs: config.maxRecallSeqs ?? DEFAULT_MAX_RECALL_SEQS,
+    recallTimeoutMs: config.recallTimeoutMs ?? DEFAULT_RECALL_TIMEOUT_MS,
+    maxRecallTimeoutMs: config.maxRecallTimeoutMs ?? DEFAULT_MAX_RECALL_TIMEOUT_MS,
     promptGuidance: config.promptGuidance ?? DEFAULT_PROMPT_GUIDANCE,
   }
   const bounds: ReadonlyArray<[string, number]> = [
@@ -162,6 +213,10 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     ['maxReadWindow', resolved.maxReadWindow],
     ['defaultEvidenceBudget', resolved.defaultEvidenceBudget],
     ['maxEvidenceBudget', resolved.maxEvidenceBudget],
+    ['defaultRecallSeqs', resolved.defaultRecallSeqs],
+    ['maxRecallSeqs', resolved.maxRecallSeqs],
+    ['recallTimeoutMs', resolved.recallTimeoutMs],
+    ['maxRecallTimeoutMs', resolved.maxRecallTimeoutMs],
   ]
   for (const [name, value] of bounds) {
     if (!Number.isSafeInteger(value) || value < 0) {
@@ -185,6 +240,15 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   }
   if (resolved.defaultEvidenceBudget > resolved.maxEvidenceBudget) {
     throw new TypeError('verbatim-memory: defaultEvidenceBudget must not exceed maxEvidenceBudget')
+  }
+  if (resolved.defaultRecallSeqs > resolved.maxRecallSeqs) {
+    throw new TypeError('verbatim-memory: recallSeqs must not exceed maxRecallSeqs')
+  }
+  if (resolved.recallTimeoutMs > resolved.maxRecallTimeoutMs) {
+    throw new TypeError('verbatim-memory: recallTimeoutMs must not exceed maxRecallTimeoutMs')
+  }
+  if (resolved.recallProvider.trim().length === 0) {
+    throw new TypeError('verbatim-memory: recallProvider must not be empty')
   }
   return resolved
 }

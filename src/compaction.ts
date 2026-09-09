@@ -162,6 +162,7 @@ export function buildVerbatimStub(
     '  memory_search({ query })   find a literal phrase',
     '  memory_read({ seq, before, after })   read one event in full',
     '  memory_ask({ query })   budgeted evidence bundle',
+    '  memory_recall({ question })   for a question whose wording you cannot guess — a child searches the log and returns verified excerpts',
     'Continue from the messages that follow; do not restate this checkpoint.',
   )
   const quotes = selectQuotes(region.userTexts, resolved)

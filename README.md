@@ -58,7 +58,7 @@ Because registration is per agent scope, the tools are not global capabilities: 
 
 ## Tools
 
-All four read only the calling session's log, including events whose surface is `shadowed` or `log-only` — the events compaction removed.
+Every tool reads only the calling session's log, including events whose surface is `shadowed` or `log-only` — the events compaction removed. `memory_recall` reaches that log through a child agent, but the excerpts it returns are re-read from the calling session before they reach the caller.
 
 `memory_list` and `memory_search` share one metadata filter set. A filter array is AND-ed with the phrase; `type`/`surface` values are OR-ed within their clause, and `seq`/`time` bounds are inclusive:
 
@@ -142,6 +142,36 @@ Return a deterministic, non-generative evidence bundle: exact excerpts with prov
 
 Excerpts are whole or absent — the builder never truncates text to fit the budget. `why_relevant` is deliberately absent: relevance is the caller's judgment, and a generated explanation would be non-memory metadata.
 
+### `memory_recall`
+
+Answer a question whose wording you cannot guess — *"is she angry?"*, *"what did we decide about the sign convention?"* — by starting a child agent that inherits this session's log, searching it, and reporting back. Registered only when a subagent runtime is reachable.
+
+| Parameter | Type | Meaning |
+|---|---|---|
+| `question` | string, required | The associative question to answer from this session's log. |
+| `max_seqs` | integer, optional | Maximum evidence pairs accepted from the child. Defaults to `recallSeqs`. |
+| `max_chars` | integer, optional | Largest total rendered size. Defaults to `defaultOutputChars`. |
+
+The child is started through `recallProvider` (default `fork`) with `maxDepth: 1` and a tool filter that leaves it **only** `memory_list`, `memory_search`, and `memory_read` — no file or shell tools, and no `memory_recall`, so a child cannot recurse. It is asked for one line plus `{seq, quote}` pairs.
+
+The caller then re-reads every pair from its own log: a pair is kept only when the quoted text really occurs at the seq it named, and a kept pair is rendered as the **exact logged text**, not the child's copy of it. The child's one line is rendered separately, labeled `child answer (unverified)`, and must not be quoted as fact.
+
+```text
+recall: is she angry?
+status: found
+child answer (unverified): Yes — she stopped answering after the argument at #1204.
+child queries: "angry", "upset", "didn't answer"
+
+Verified excerpts (exact logged text, re-read from this session at the child's seqs):
+
+[#1206] user/message @ 2026-09-09T18:04:11.002Z surface=shadowed
+I'm not going to pretend that was fine.
+```
+
+`status` is one of `found`, `empty` (child found nothing — it reports the phrases it tried), `unverified` (every pair failed to match this session's log), `cancelled` (the child exceeded `recallTimeoutMs`), or `error` (the child ended with a non-`completed` stop reason, reported with its diagnostic rather than as a false negative).
+
+Because a fork seed classifies inherited events `shadowed`, the child receives this log as *data*, not as prompt context: it must query, and the plugin never pays to replay an archive into a prompt. The cost of one recall is the child's own search loop — a few model round trips — not the size of the archive.
+
 ## Verbatim compaction
 
 `dsh-verbatim-memory/compaction` registers `ctx.compaction` with `VerbatimCompactionEngine`, a `BasicCompactionEngine` subclass that overrides the single `summarize()` hook. It keeps every inherited behavior — token-meter pressure, routed retention budgets, tool-pair boundary safety, the durable `compaction/*` bracket, shrink validation, and overflow recovery — and returns a deterministic stub instead of a model call:
@@ -183,6 +213,12 @@ Tools entry:
 | `defaultEvidenceBudget` | `6000` | `memory_ask` token budget when omitted. |
 | `maxEvidenceBudget` | `60000` | Largest accepted `budget_tokens`. |
 | `exposeAfterCompaction` | `true` | Keep the tools hidden until this session has been compacted. |
+| `recallEnabled` | `true` | Register `memory_recall` when a subagent runtime is reachable. |
+| `recallProvider` | `fork` | Subagent provider `memory_recall` starts its child through. |
+| `recallSeqs` | `8` | Evidence pairs accepted from one recall child. |
+| `maxRecallSeqs` | `32` | Largest accepted `max_seqs`. |
+| `recallTimeoutMs` | `120000` | Wall-clock budget for one recall child, in milliseconds. |
+| `maxRecallTimeoutMs` | `900000` | Largest accepted recall timeout. |
 | `promptGuidance` | *(built-in)* | Model-facing guidance contributed while the tools are visible. |
 
 Compaction entry:
@@ -213,7 +249,8 @@ This package's literal scan needs no index and works on every deployment, includ
 ## Model experience
 
 - **System prompt** — one fixed guidance section (`tool:verbatim-memory`, order 114), present only for sessions whose tools are installed; KV-cache prefix-stable while it is present.
-- **Tool catalog** — zero memory schemas before compaction, four after. The catalog change fires `tools/change`, so the next assembly reflects it.
+- **Tool catalog** — zero memory schemas before compaction, four after, five when a subagent runtime is reachable. The catalog change fires `tools/change`, so the next assembly reflects it.
+- **Delegated recall** — `memory_recall` blocks for the child's run and returns one labeled, unverified sentence plus exact excerpts. It is the only tool here that starts another agent, and it is unavailable to a seeded child session.
 - **Tool results** — plain text, bounded by the row and total output budgets; oversized rows are truncated at a marker naming the `seq` that reads them in full, and the host's spill policy is the last resort rather than the first.
 - **Compaction** — the replacement checkpoint is metadata and retrieval instructions only, and it names the tools that just became available. Note that the base backend frames every checkpoint with a fixed "condensing an earlier span" preamble; the stub body states explicitly that no summary was generated.
 
@@ -227,7 +264,9 @@ This package's literal scan needs no index and works on every deployment, includ
 
 - **Literal scan, not ranked retrieval** — `memory_search` and `memory_list` use the service's provider-independent predicates: literal text plus `type`/`surface`/`seq`/`time` metadata. There is no relevance ranking or tokenizer tuning. Enable FTS5 and the official tool package for ranked cross-session search.
 - **Metadata predicates need a known vocabulary** — `memory_list({ type })` enumerates types the caller names; the tools do not expose a type histogram, so an unfamiliar log is explored by listing unfiltered rows first.
-- **No embeddings** — the harness ships no embedding provider, so semantic recall is out of scope here.
+- **No embeddings** — the harness ships no embedding provider, so semantic recall is out of scope here. `memory_recall` narrows the gap by delegating the *search* to a child agent, but the child still queries with literal phrases; it does not embed.
+- **Recall is generative in one narrow place** — the child's one-line answer is a model output, so it is labeled `unverified` and never used as evidence. Only the excerpts, re-read from this session at the seqs the child named, are treated as exact.
+- **Recall costs a child run** — one call blocks for several model round trips, bounded by `recallTimeoutMs`. The archive is not replayed into the child's prompt, so the cost scales with the child's search loop, not with log size.
 - **Whole-log detection on resume** — deciding whether a resumed session compacted reads a snapshot of its log once at agent creation; very large logs pay that cost once.
 - **Fixed checkpoint preamble** — owned by `@deepseek-ai/dsh-compaction-basic`; only the checkpoint body is replaced.
 - **Shrink validation still applies** — a verbatim checkpoint must be smaller than the region it replaces, exactly like a summary.
