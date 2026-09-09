@@ -33,6 +33,24 @@ import type { ScanHit, SessionQueryLike } from './scan.js'
 export const RECALL_CHILD_TOOLS = ['memory_list', 'memory_search', 'memory_read'] as const
 
 /**
+ * Every tool a recall child may execute: the retrieval set plus its answer
+ * channel. The child's own scope also holds tools `restrict()` cannot remove —
+ * the harness's per-agent `subagent` tool — so this list is enforced by a guard
+ * rather than by the catalog alone.
+ */
+export const RECALL_CHILD_ALLOWED_TOOLS: readonly string[] = [
+  ...RECALL_CHILD_TOOLS,
+  'memory_ask',
+  'structured_output',
+]
+
+/**
+ * Label prefix that identifies this plugin's recall children in the durable
+ * `subagent/descriptor` event the delegation runtime writes into each child.
+ */
+export const RECALL_CHILD_LABEL_PREFIX = 'memory_recall: '
+
+/**
  * Tool filter applied to the recall child.
  *
  * `allow: []` keeps none of the tools the child would otherwise inherit — the
@@ -51,7 +69,9 @@ export const RECALL_CHILD_TOOL_FILTER: RecallToolRestriction = { allow: [] }
  * The durable descriptor is appended to the child session, never to the parent
  * that spawned it, so its presence means the log belongs to a child.
  */
-const CHILD_MARKERS: ReadonlySet<string> = new Set(['subagent/descriptor'])
+const DESCRIPTOR_EVENT_TYPE = 'subagent/descriptor'
+
+const CHILD_MARKERS: ReadonlySet<string> = new Set([DESCRIPTOR_EVENT_TYPE])
 
 /** One text block handed to a child agent. */
 export interface RecallPromptBlock {
@@ -230,6 +250,26 @@ export function isSubagentChild(agent: Agent): boolean {
 }
 
 /**
+ * Whether one agent is a child this plugin started for a recall.
+ *
+ * The child is identified by the label this module writes into its start
+ * request, which the delegation runtime persists as the child's own
+ * `subagent/descriptor` event. This is narrower than {@link isSubagentChild} on
+ * purpose: only a recall child is locked down to {@link
+ * RECALL_CHILD_ALLOWED_TOOLS}, so a child the user delegates to by hand keeps
+ * its normal catalog.
+ * @param agent - the agent to classify.
+ * @returns true when the agent is a recall child.
+ */
+export function isRecallChild(agent: Agent): boolean {
+  return agent.session.snapshotEvents().some((event) => {
+    if ((event.type as string) !== DESCRIPTOR_EVENT_TYPE) return false
+    const label = (event as { data?: { label?: unknown } }).data?.label
+    return typeof label === 'string' && label.startsWith(RECALL_CHILD_LABEL_PREFIX)
+  })
+}
+
+/**
  * Build the child's user message: the question, the retrieval contract, and the
  * exact output shape. The child is told the archive is present as data, because
  * a fork seed does not put it in the child's visible context.
@@ -325,7 +365,7 @@ export function resolveSubagents(scope: unknown): SubagentsLike | undefined {
 export async function runRecall(request: RecallRequest): Promise<RecallOutcome> {
   const { question, maxSeqs } = request
   const run = await request.subagents.start(request.provider, {
-    label: `memory_recall: ${question.slice(0, 60)}`,
+    label: `${RECALL_CHILD_LABEL_PREFIX}${question.slice(0, 60)}`,
     prompt: buildRecallPrompt(question, maxSeqs),
     parent: request.parent,
     signal: request.signal,

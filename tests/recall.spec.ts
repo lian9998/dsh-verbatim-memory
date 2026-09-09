@@ -6,9 +6,12 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { apply } from '../src/index.js'
 import type { Config } from '../src/index.js'
 import {
+  RECALL_CHILD_ALLOWED_TOOLS,
+  RECALL_CHILD_LABEL_PREFIX,
   RECALL_CHILD_TOOLS,
   RECALL_OUTPUT_SCHEMA,
   buildRecallPrompt,
+  isRecallChild,
   isSubagentChild,
   parseRecallChild,
 } from '../src/recall.js'
@@ -65,6 +68,14 @@ function fakeSubagents(
 
 /** Session-header facts a real session always carries; tests override per case. */
 type FakeHeader = Record<string, unknown>
+
+/** One durable child descriptor event as the delegation runtime writes it. */
+function descriptor(label: string): SessionEvent {
+  return {
+    type: 'subagent/descriptor',
+    data: { version: 3, mode: 'one-shot', provider: 'fork', label },
+  } as unknown as SessionEvent
+}
 
 function execution(
   events: readonly SessionEvent[] = [],
@@ -134,6 +145,26 @@ describe('memory_recall registration', () => {
     expect([...handle.fiber.scope!.tools.keys()].sort())
       .toEqual([...RECALL_CHILD_TOOLS, 'memory_ask'].sort())
     expect(handle.fiber.scope!.tools.has('memory_recall')).toBe(false)
+    // A hand-delegated child keeps its normal catalog: no guard is installed.
+    expect(handle.fiber.scope!.guards).toHaveLength(0)
+  })
+
+  it('locks a recall child down to the read-only tools at execution', () => {
+    const handle = fakeAgent(
+      's-recall',
+      [checkpointEvent(), descriptor(`${RECALL_CHILD_LABEL_PREFIX}is she angry?`)],
+      fakeSessionQuery(sessionFixture()),
+      fakeSubagents({ structured: { answer: 'x', evidence: [] } }),
+      { origin: 'subagent', delegationDepth: 1 },
+    )
+    apply(fakeHarness([handle.agent]).ctx, {})
+    const guards = handle.fiber.scope!.guards
+    expect(guards).toHaveLength(1)
+    const guard = guards[0]!
+    for (const allowed of RECALL_CHILD_ALLOWED_TOOLS) expect(guard({ name: allowed })).toBeUndefined()
+    // `subagent` is registered in the child's own scope, so only the guard can stop it.
+    expect(guard({ name: 'subagent' })).toMatch(/may only use/)
+    expect(guard({ name: 'bash' })).toMatch(/may only use/)
   })
 })
 
@@ -297,16 +328,22 @@ describe('memory_recall verification', () => {
 })
 
 describe('recall helpers', () => {
+  const agentOf = (header: FakeHeader, events: readonly SessionEvent[] = []): Agent => ({
+    session: { id: SessionId('s-self'), header, snapshotEvents: () => events },
+  } as unknown as Agent)
+
   it('detects a subagent child from header facts or its descriptor', () => {
-    const agent = (header: FakeHeader, events: readonly SessionEvent[] = []): Agent => ({
-      session: { id: SessionId('s-self'), header, snapshotEvents: () => events },
-    } as unknown as Agent)
-    const descriptor = [{ type: 'subagent/descriptor' } as unknown as SessionEvent]
-    expect(isSubagentChild(agent({ origin: 'subagent' }))).toBe(true)
-    expect(isSubagentChild(agent({ delegationDepth: 1 }))).toBe(true)
-    expect(isSubagentChild(agent({}, descriptor))).toBe(true)
-    expect(isSubagentChild(agent({ isSeeded: true, inheritedEventCount: 27819 }))).toBe(false)
-    expect(isSubagentChild(agent({}))).toBe(false)
+    expect(isSubagentChild(agentOf({ origin: 'subagent' }))).toBe(true)
+    expect(isSubagentChild(agentOf({ delegationDepth: 1 }))).toBe(true)
+    expect(isSubagentChild(agentOf({}, [descriptor('anything')]))).toBe(true)
+    expect(isSubagentChild(agentOf({ isSeeded: true, inheritedEventCount: 27819 }))).toBe(false)
+    expect(isSubagentChild(agentOf({}))).toBe(false)
+  })
+
+  it('identifies only this plugin\'s own recall children', () => {
+    expect(isRecallChild(agentOf({}, [descriptor(`${RECALL_CHILD_LABEL_PREFIX}is she angry?`)]))).toBe(true)
+    expect(isRecallChild(agentOf({}, [descriptor('investigate the parser')]))).toBe(false)
+    expect(isRecallChild(agentOf({}, []))).toBe(false)
   })
 
   it('states the output contract in the child prompt', () => {

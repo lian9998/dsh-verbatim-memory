@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.3
+
+Hardening found by the live end-to-end run: the recall child's catalog is not
+fully controllable by `restrict()`, so the allowlist is now enforced at
+execution.
+
+- **Own-scope tools cannot be restricted** — the child's live request header
+  listed six tools: the four read-only memory tools, the delegation runtime's
+  `structured_output`, and the harness's per-agent `subagent` tool. The last is
+  registered in the child's own scope, which `restrict()` never filters by
+  design, and the `subagent` tool defaults to `maxDepth: 3` — so a misbehaving
+  child could delegate further. Memory recursion was already impossible (the
+  in-body refusal), but "read-only retrieval index" was not literally enforced.
+- **Execution guard** — a recall child's scope now registers
+  `tools.guard()`, denying every call outside `memory_list`, `memory_search`,
+  `memory_read`, `memory_ask`, and `structured_output`. It applies to recall
+  children only, identified by the `memory_recall: ` label this plugin writes
+  into the child's durable descriptor, so a child the user delegates to by hand
+  keeps its normal catalog.
+
 ## 0.4.2
 
 Fix: the recall child could not be started at all — `toolFilter` named tools the

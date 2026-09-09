@@ -32,7 +32,9 @@ import { parseFilters, SURFACE_VALUES } from './filters.js'
 import { renderEvidence, renderHits, renderRecall, renderRows, renderWindow } from './format.js'
 import type { RenderBudget } from './format.js'
 import {
+  isRecallChild,
   isSubagentChild,
+  RECALL_CHILD_ALLOWED_TOOLS,
   requireQuestion,
   resolveSubagents,
   runRecall,
@@ -225,6 +227,16 @@ export function installMemoryTools(scope: Context, resolved: ResolvedConfig, age
       return renderEvidence(buildEvidenceBundle(queryText, caller.id, outcome, budget))
     },
   }))
+
+  // A recall child is a retrieval index, not an agent. Its own scope also holds
+  // tools no restriction can remove — the harness registers `subagent` there —
+  // so the allowlist is enforced at execution. Only recall children are locked
+  // down: a child the user delegates to by hand keeps its normal catalog.
+  if (isRecallChild(agent)) {
+    scope.tools.guard(execution => RECALL_CHILD_ALLOWED_TOOLS.includes(execution.name)
+      ? undefined
+      : `this recall child may only use ${RECALL_CHILD_ALLOWED_TOOLS.join(', ')}`)
+  }
 
   // Recall is optional: it needs a subagent runtime, and the other four tools
   // must keep working when a deployment has none.

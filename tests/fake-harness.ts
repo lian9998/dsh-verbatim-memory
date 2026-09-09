@@ -15,6 +15,8 @@ import type { SessionQueryLike } from '../src/scan.js'
 export interface FakeScope {
   /** Tools registered in this scope. */
   readonly tools: Map<string, ToolDefinition>
+  /** Guards registered in this scope, in registration order. */
+  readonly guards: Array<(execution: { name: string }) => string | undefined>
   /** Prompt sections registered in this scope. */
   readonly sections: Array<{ name: string; order: number; text: string }>
   /** The session-query service this scope resolves. */
@@ -78,6 +80,7 @@ export function fakeAgent(
   }
   const scopeOf = (): FakeScope => ({
     tools: new Map<string, ToolDefinition>(),
+    guards: [],
     sections: [],
     sessionQuery,
     ...subagents === undefined ? {} : { subagents },
@@ -93,6 +96,10 @@ export function fakeAgent(
           tools: {
             register: (definition: ToolDefinition) => {
               scope.tools.set(definition.name, definition)
+              return () => undefined
+            },
+            guard: (guard: (execution: { name: string }) => string | undefined) => {
+              scope.guards.push(guard)
               return () => undefined
             },
           },
