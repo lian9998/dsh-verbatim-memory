@@ -1,0 +1,40 @@
+# Agent-plane rows for a user preset copied from the shipped `standard` preset.
+#
+# Copy `standard` to a user preset first (never edit the shipped install), then
+# merge these rows into that copy's `agent.cordis.yml`.
+#
+# 1. Replace the summarization backend with the verbatim one. The row stays
+#    INSIDE the existing `compaction` isolate realm because compaction-basic
+#    reads `toolResultPruner` through `ctx.get` and both rows must share the
+#    realm. Keep `command-compact` so /compact stays available.
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-verbatim
+      name: 'dsh-verbatim-memory/compaction'
+      config:
+        auto: true
+        includeUserQuotes: false
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# 2. Add the model-facing memory tools. They consume the HOST `sessionQuery`
+#    service and publish nothing, so they sit loose and need no isolate realm.
+#    Wrapping them in a realm of their own would hide that host service.
+- id: tool-verbatim-memory
+  name: 'dsh-verbatim-memory'
+  config:
+    defaultSearchResults: 20
+    maxSessionsScanned: 60
