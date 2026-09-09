@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.1
+
+Fix: `memory_recall` refused to run in the sessions that need it most.
+
+- **Wrong child test** — the recursion guard keyed on the `session/end-seed`
+  event, which marks the end of a constructor seed. A *top-level* session
+  acquires that marker too, whenever it is resumed from storage (a host restart)
+  or replayed around a compaction, so a root agent that had just been resumed or
+  compacted got `memory_recall is unavailable to a subagent`. The guard now reads
+  the durable facts the subagent runtime stamps on every child session —
+  `origin: 'subagent'` and a positive `delegationDepth` — and falls back to the
+  child's own `subagent/descriptor` event. Behavior for real subagent children
+  (including a recall child) is unchanged: they are still refused.
+
 ## 0.4.0
 
 Delegated recall: the one question a literal scan cannot answer is now a tool

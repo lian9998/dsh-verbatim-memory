@@ -250,7 +250,7 @@ This package's literal scan needs no index and works on every deployment, includ
 
 - **System prompt** — one fixed guidance section (`tool:verbatim-memory`, order 114), present only for sessions whose tools are installed; KV-cache prefix-stable while it is present.
 - **Tool catalog** — zero memory schemas before compaction, four after, five when a subagent runtime is reachable. The catalog change fires `tools/change`, so the next assembly reflects it.
-- **Delegated recall** — `memory_recall` blocks for the child's run and returns one labeled, unverified sentence plus exact excerpts. It is the only tool here that starts another agent, and it is unavailable to a seeded child session.
+- **Delegated recall** — `memory_recall` blocks for the child's run and returns one labeled, unverified sentence plus exact excerpts. It is the only tool here that starts another agent, and it is unavailable to a subagent child session (identified by the durable `origin: subagent` / `delegationDepth` header facts, so a top-level session resumed after a restart — whose log also carries a `session/end-seed` boundary — keeps the tool).
 - **Tool results** — plain text, bounded by the row and total output budgets; oversized rows are truncated at a marker naming the `seq` that reads them in full, and the host's spill policy is the last resort rather than the first.
 - **Compaction** — the replacement checkpoint is metadata and retrieval instructions only, and it names the tools that just became available. Note that the base backend frames every checkpoint with a fixed "condensing an earlier span" preamble; the stub body states explicitly that no summary was generated.
 

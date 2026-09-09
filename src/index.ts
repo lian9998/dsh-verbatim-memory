@@ -32,7 +32,7 @@ import { parseFilters, SURFACE_VALUES } from './filters.js'
 import { renderEvidence, renderHits, renderRecall, renderRows, renderWindow } from './format.js'
 import type { RenderBudget } from './format.js'
 import {
-  isSeededChild,
+  isSubagentChild,
   requireQuestion,
   resolveSubagents,
   runRecall,
@@ -259,7 +259,7 @@ export function installMemoryTools(scope: Context, resolved: ResolvedConfig): vo
       const question = requireQuestion(args.question)
       // callerOf already rejected an agent-less execution.
       const parent = exec.agent as Agent
-      if (isSeededChild(parent.session.snapshotEvents())) {
+      if (isSubagentChild(parent)) {
         throw new HarnessError(
           'memory_recall is unavailable to a subagent; a recall child has the read-only memory tools instead',
           'VERBATIM_MEMORY_RECURSIVE_RECALL',

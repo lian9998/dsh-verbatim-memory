@@ -22,7 +22,7 @@
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { scanSession } from './scan.js'
 import type { ScanHit, SessionQueryLike } from './scan.js'
 
@@ -32,8 +32,13 @@ import type { ScanHit, SessionQueryLike } from './scan.js'
  */
 export const RECALL_CHILD_TOOLS = ['memory_list', 'memory_search', 'memory_read'] as const
 
-/** Event types that mark a log as a seeded child session rather than a root session. */
-const SEED_MARKERS: ReadonlySet<string> = new Set(['session/end-seed', 'subagent/descriptor'])
+/**
+ * Event type that marks a subagent child's log when its header is unavailable.
+ *
+ * The durable descriptor is appended to the child session, never to the parent
+ * that spawned it, so its presence means the log belongs to a child.
+ */
+const CHILD_MARKERS: ReadonlySet<string> = new Set(['subagent/descriptor'])
 
 /** One text block handed to a child agent. */
 export interface RecallPromptBlock {
@@ -187,15 +192,28 @@ export function requireQuestion(raw: string): string {
 }
 
 /**
- * Whether one session log belongs to a seeded child agent.
+ * Whether the calling agent is a subagent child rather than a top-level session.
  *
- * A recall child is a seeded child, so this is the recursion guard: a child that
- * somehow reached this tool would be refused rather than spawning a grandchild.
- * @param events - the session's raw log in ascending seq order.
- * @returns true when the log carries a seed boundary or a subagent descriptor.
+ * A recall child is a subagent child, so this is the recursion guard: a child
+ * that somehow reached this tool is refused instead of spawning a grandchild.
+ * The test reads the durable header facts the subagent runtime stamps on every
+ * child session at creation — `origin: 'subagent'` and a positive
+ * `delegationDepth` — and falls back to the child's own descriptor event.
+ *
+ * It is deliberately NOT keyed on `session/end-seed`. That event marks the end
+ * of a constructor seed, which every *top-level* session also acquires when it
+ * is resumed from storage (a host restart) or replayed around a compaction.
+ * Keying on it refused `memory_recall` in exactly the sessions that need it
+ * most, reporting "unavailable to a subagent" to a root agent.
+ * @param agent - the calling agent.
+ * @returns true when the caller is a subagent child.
  */
-export function isSeededChild(events: readonly SessionEvent[]): boolean {
-  return events.some(event => SEED_MARKERS.has(event.type as string))
+export function isSubagentChild(agent: Agent): boolean {
+  // Structurally typed because a test double may omit the header entirely.
+  const header = agent.session.header as { origin?: string; delegationDepth?: number } | undefined
+  if (header?.origin === 'subagent') return true
+  if ((header?.delegationDepth ?? 0) > 0) return true
+  return agent.session.snapshotEvents().some(event => CHILD_MARKERS.has(event.type as string))
 }
 
 /**

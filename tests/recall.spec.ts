@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -8,7 +9,7 @@ import {
   RECALL_CHILD_TOOLS,
   RECALL_OUTPUT_SCHEMA,
   buildRecallPrompt,
-  isSeededChild,
+  isSubagentChild,
   parseRecallChild,
 } from '../src/recall.js'
 import type { RecallChildResult, RecallStartRequest, SubagentsLike } from '../src/recall.js'
@@ -62,9 +63,15 @@ function fakeSubagents(
   return fake
 }
 
-function execution(events: readonly SessionEvent[] = []): ToolRunContext {
+/** Session-header facts a real session always carries; tests override per case. */
+type FakeHeader = Record<string, unknown>
+
+function execution(
+  events: readonly SessionEvent[] = [],
+  header: FakeHeader = {},
+): ToolRunContext {
   return {
-    agent: { session: { id: SessionId('s-self'), snapshotEvents: () => events } },
+    agent: { session: { id: SessionId('s-self'), header, snapshotEvents: () => events } },
     signal: new AbortController().signal,
   } as unknown as ToolRunContext
 }
@@ -74,10 +81,11 @@ async function call(
   name: string,
   args: unknown,
   events: readonly SessionEvent[] = [],
+  header: FakeHeader = {},
 ): Promise<string> {
   const definition = scope.tools.get(name)
   if (definition === undefined) throw new Error(`missing tool ${name}`)
-  return await (definition as ToolDefinition).execute(args, execution(events)) as string
+  return await (definition as ToolDefinition).execute(args, execution(events, header)) as string
 }
 
 function installed(subagents: SubagentsLike, config?: Config): FakeScope {
@@ -134,11 +142,37 @@ describe('memory_recall child contract', () => {
     expect(subagents.requests).toHaveLength(0)
   })
 
-  it('refuses a recursive call from a seeded child session', async () => {
+  it('refuses a recursive call from a subagent child session', async () => {
     const scope = installed(fakeSubagents({ structured: { answer: 'x', evidence: [] } }))
-    const seeded = [{ type: 'subagent/descriptor' } as unknown as SessionEvent]
-    await expect(call(scope, 'memory_recall', { question: 'is she angry?' }, seeded))
+    const child = [{ type: 'subagent/descriptor' } as unknown as SessionEvent]
+    await expect(call(scope, 'memory_recall', { question: 'is she angry?' }, child, { origin: 'subagent', delegationDepth: 1 }))
       .rejects.toThrowError(/unavailable to a subagent/)
+  })
+
+  it('refuses a subagent child that declares only a delegation depth', async () => {
+    const subagents = fakeSubagents({ structured: { answer: 'x', evidence: [] } })
+    await expect(call(installed(subagents), 'memory_recall', { question: 'is she angry?' }, [], { delegationDepth: 2 }))
+      .rejects.toThrowError(/unavailable to a subagent/)
+    expect(subagents.requests).toHaveLength(0)
+  })
+
+  // Regression: `session/end-seed` marks the end of a constructor seed, which a
+  // resumed top-level session also carries. It must not read as "this is a child".
+  it('allows a resumed top-level session whose log carries a seed boundary', async () => {
+    const subagents = fakeSubagents({
+      structured: { answer: 'yes', evidence: [] },
+      stopReason: 'completed',
+    })
+    const resumed = [{ type: 'session/end-seed' } as unknown as SessionEvent]
+    const text = await call(
+      installed(subagents),
+      'memory_recall',
+      { question: 'is she angry?' },
+      resumed,
+      { isSeeded: true, inheritedEventCount: 27819 },
+    )
+    expect(subagents.requests).toHaveLength(1)
+    expect(text).toContain('status: empty')
   })
 })
 
@@ -249,9 +283,16 @@ describe('memory_recall verification', () => {
 })
 
 describe('recall helpers', () => {
-  it('detects a seeded child log', () => {
-    expect(isSeededChild([{ type: 'session/end-seed' } as unknown as SessionEvent])).toBe(true)
-    expect(isSeededChild([{ type: 'user/message' } as unknown as SessionEvent])).toBe(false)
+  it('detects a subagent child from header facts or its descriptor', () => {
+    const agent = (header: FakeHeader, events: readonly SessionEvent[] = []): Agent => ({
+      session: { id: SessionId('s-self'), header, snapshotEvents: () => events },
+    } as unknown as Agent)
+    const descriptor = [{ type: 'subagent/descriptor' } as unknown as SessionEvent]
+    expect(isSubagentChild(agent({ origin: 'subagent' }))).toBe(true)
+    expect(isSubagentChild(agent({ delegationDepth: 1 }))).toBe(true)
+    expect(isSubagentChild(agent({}, descriptor))).toBe(true)
+    expect(isSubagentChild(agent({ isSeeded: true, inheritedEventCount: 27819 }))).toBe(false)
+    expect(isSubagentChild(agent({}))).toBe(false)
   })
 
   it('states the output contract in the child prompt', () => {
